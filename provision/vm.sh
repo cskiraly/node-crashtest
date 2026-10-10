@@ -87,10 +87,10 @@ EOF
 Host $name
     HostName $ip
     User root
-    IdentityFile $KEY
+    IdentityFile "$KEY"
     IdentitiesOnly yes
     IdentityAgent none
-    UserKnownHostsFile $NODES/$name.known_hosts
+    UserKnownHostsFile "$NODES/$name.known_hosts"
     StrictHostKeyChecking accept-new
 EOF
 	for _ in $(seq 60); do

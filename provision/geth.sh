@@ -10,14 +10,16 @@
 #   provision/geth.sh NAME --geth BIN [options]
 #
 #   --geth BIN             the geth to run: linux/amd64, for Ubuntu 24.04 (glibc 2.39 at most)
-#   --network NET          hoodi (default) or sepolia; mainnet with --beacon-api or --cl
+#   --network NET          hoodi (default) or sepolia; mainnet with --beacon-api or --cl. Kept on the
+#                          VM: an update follows the same network, and refuses another one
 #   --beacon-api URL       a beacon API endpoint for the light client (repeatable; defaults below)
 #   --cl prysm             Prysm instead of the light client
 #   --prysm BIN            its beacon node binary (default: the release pinned below, fetched and
 #                          checked on the VM)
 #   --checkpoint-sync URL  Prysm's checkpoint sync endpoint, also for the genesis state (defaults below)
 #   --history BLOCKS|all   the history geth keeps: about BLOCKS blocks back from the finalized block
-#                          (default 50000), or all of it. Chosen once, on the first install
+#                          (default 50000; needs a geth with custom history cutoffs, go-ethereum
+#                          #35792), or all of it. Kept once geth has started with it
 #   --restart POLICY       the units' Restart= (default always: geth stops with exit 0 when the disk is
 #                          nearly full, which on-failure doesn't restart)
 #   --geth-flags "FLAGS"   more geth flags
@@ -34,11 +36,11 @@ PRYSM_VERSION=v7.2.1
 PRYSM_SHA256=b4651effbccb242c181452ac89f176f28186b96e1548a3ed29c5d035fc9cabbc
 PRYSM_URL=https://github.com/OffchainLabs/prysm/releases/download/$PRYSM_VERSION/beacon-chain-$PRYSM_VERSION-linux-amd64
 
-usage() { sed -n '3,28p' "$0"; exit 2; }
+usage() { sed -n '3,30p' "$0"; exit 2; }
 [ $# -ge 1 ] && [[ $1 != -* ]] || usage
 NAME=$1
 shift
-GETH="" NETWORK=hoodi APIS="" CL="" PRYSM="" CKPT_SYNC="" HISTORY=50000 RESTART=always GETH_FLAGS=""
+GETH="" NETWORK="" APIS="" CL="" PRYSM="" CKPT_SYNC="" HISTORY=50000 RESTART=always GETH_FLAGS=""
 VMARGS=()
 while [ $# -gt 0 ]; do
 	[ $# -ge 2 ] || usage
@@ -61,20 +63,7 @@ done
 [ -z "$PRYSM" ] || [ -x "$PRYSM" ] || die "--prysm: an executable"
 [[ $HISTORY =~ ^([0-9]+|all)$ ]] || die "--history: a number of blocks, or all"
 case $CL in "" | prysm) ;; *) die "--cl: prysm (or nothing, for the light client)" ;; esac
-case $NETWORK in
-hoodi)
-	DEFAULT_APIS="https://lodestar-hoodi.chainsafe.io http://testing.hoodi.beacon-api.nimbus.team"
-	DEFAULT_CKPT=https://checkpoint-sync.hoodi.ethpandaops.io ;;
-sepolia)
-	DEFAULT_APIS="https://lodestar-sepolia.chainsafe.io"
-	DEFAULT_CKPT=https://checkpoint-sync.sepolia.ethpandaops.io ;;
-mainnet) DEFAULT_APIS="" DEFAULT_CKPT=https://beaconstate.info ;;
-*) die "--network: hoodi, sepolia or mainnet" ;;
-esac
-APIS=${APIS:-$DEFAULT_APIS}
-CKPT_SYNC=${CKPT_SYNC:-$DEFAULT_CKPT}
-[ -n "$CL" ] || [ -n "$APIS" ] || die "the light client needs --beacon-api on $NETWORK"
-REF=$(reference_rpc "$NETWORK")
+case $NETWORK in "" | hoodi | sepolia | mainnet) ;; *) die "--network: hoodi, sepolia or mainnet" ;; esac
 
 NODES=$CRASHTEST_CONFIG/nodes
 SSHCFG=$NODES/$NAME.ssh
@@ -85,39 +74,63 @@ if "${VIRSH[@]}" dominfo "$NAME" >/dev/null 2>&1; then
 	[ "$("${VIRSH[@]}" desc "$NAME")" = "node-crashtest VM" ] && [ -f "$SSHCFG" ] ||
 		die "$NAME exists but wasn't made by provision/vm.sh"
 	log "updating the node on $NAME"
-	vm 'systemctl stop geth prysm 2>/dev/null; true'
+	was=$(vm 'cat /etc/node-crashtest/network 2>/dev/null' || true)
+	[ -z "$was" ] || [ -z "$NETWORK" ] || [ "$NETWORK" = "$was" ] ||
+		die "$NAME follows $was: another network needs a new node (provision/vm.sh delete $NAME)"
+	NETWORK=${NETWORK:-$was}
 else
 	log "creating the VM $NAME"
 	"$CRASHTEST/provision/vm.sh" create "$NAME" "${VMARGS[@]}" >/dev/null
+fi
+vm 'for c in jq curl iptables; do command -v $c >/dev/null || exit 1; done' ||
 	vm 'export DEBIAN_FRONTEND=noninteractive; apt-get -qq -o DPkg::Lock::Timeout=600 update &&
 		apt-get -qq -o DPkg::Lock::Timeout=600 install -y jq curl iptables >/dev/null' ||
-		die "could not install packages on $NAME"
-fi
+	die "could not install packages on $NAME"
+
+NETWORK=${NETWORK:-hoodi}
+case $NETWORK in
+hoodi)
+	DEFAULT_APIS="https://lodestar-hoodi.chainsafe.io http://testing.hoodi.beacon-api.nimbus.team"
+	DEFAULT_CKPT=https://checkpoint-sync.hoodi.ethpandaops.io ;;
+sepolia)
+	DEFAULT_APIS="https://lodestar-sepolia.chainsafe.io"
+	DEFAULT_CKPT=https://checkpoint-sync.sepolia.ethpandaops.io ;;
+mainnet) DEFAULT_APIS="" DEFAULT_CKPT=https://beaconstate.info ;;
+esac
+APIS=${APIS:-$DEFAULT_APIS}
+CKPT_SYNC=${CKPT_SYNC:-$DEFAULT_CKPT}
+[ -n "$CL" ] || [ -n "$APIS" ] || die "the light client needs --beacon-api on $NETWORK"
+REF=$(reference_rpc "$NETWORK")
 
 # --- geth ---------------------------------------------------------------------------------------
+# The new binary is checked before the node (if there is one) is stopped.
 log "installing geth ($(sha256sum "$GETH" | cut -c1-12))"
 vm 'cat > /usr/local/bin/geth.new && chmod 755 /usr/local/bin/geth.new' < "$GETH"
 GETH_VERSION=$(vm '/usr/local/bin/geth.new version' | awk -F': ' '/^Version|^Git Commit:/ { printf "%s ", $2 }') ||
 	die "this geth doesn't run on $NAME (Ubuntu 24.04: is it linux/amd64, for glibc 2.39 at most?)"
 GETH_VERSION=${GETH_VERSION% }
-vm 'mv -f /usr/local/bin/geth.new /usr/local/bin/geth
+vm "systemctl stop geth prysm 2>/dev/null
+	mv -f /usr/local/bin/geth.new /usr/local/bin/geth
 	id geth >/dev/null 2>&1 || useradd --system --home-dir /var/lib/geth --shell /usr/sbin/nologin geth
 	install -d -o geth -g geth -m 700 /var/lib/geth
-	install -d -m 755 /etc/node-crashtest'
+	install -d -m 755 /etc/node-crashtest
+	echo $NETWORK > /etc/node-crashtest/network"
 
-# The history cutoff: chosen once (geth refuses a database whose tail doesn't match --history.chain).
-cutoff=$(vm 'cat /etc/node-crashtest/history-chain 2>/dev/null' || true)
+# The history cutoff: chosen once, and kept once geth has started with it (geth refuses a database
+# whose tail doesn't match --history.chain).
+cutoff=$(vm 'cat /etc/node-crashtest/history-chain 2>/dev/null' || true) pin=0
 if [ -z "$cutoff" ]; then
+	pin=1
 	if [ "$HISTORY" = all ]; then
 		cutoff=all
 	else
-		fin=$(( $(rpc "$REF" eth_getBlockByNumber '["finalized",false]' | jq -r .result.number) ))
+		fin=$(rpc "$REF" eth_getBlockByNumber '["finalized",false]' | jq -r .result.number 2>/dev/null) || true
+		[[ $fin =~ ^0x[0-9a-f]+$ ]] || die "no finalized block from the reference ($REF)"
 		n=$(( fin > HISTORY ? fin - HISTORY : 0 ))
-		hash=$(rpc "$REF" eth_getBlockByNumber "[\"$(printf 0x%x "$n")\",false]" | jq -r .result.hash)
+		hash=$(rpc "$REF" eth_getBlockByNumber "[\"$(printf 0x%x "$n")\",false]" | jq -r .result.hash 2>/dev/null) || true
 		[[ $hash =~ ^0x[0-9a-f]{64}$ ]] || die "no block $n from the reference ($REF)"
 		cutoff=$n:$hash
 	fi
-	vm "echo '$cutoff' > /etc/node-crashtest/history-chain"
 	log "history: $cutoff"
 fi
 [ "$cutoff" = all ] && HISTORY_START=0 || HISTORY_START=${cutoff%%:*}
@@ -134,7 +147,7 @@ if [ -z "$CL" ]; then
 		for _ in 1 2 3 4 5; do
 			roots=$(for a in $APIS; do
 				curl -fsS -m 20 "$a/eth/v1/beacon/headers/finalized" | jq -r .data.root || true
-			done | grep -E '^0x[0-9a-f]{64}$' | sort -u)
+			done | grep -E '^0x[0-9a-f]{64}$' | sort -u || true)
 			[ "$(grep -c . <<<"$roots")" = 1 ] && root=$roots && break
 			sleep 15 # none, or the endpoints disagree (finality moved between requests)
 		done
@@ -205,7 +218,7 @@ cat > "$NODES/$NAME.env" <<EOF
 # Written by node-crashtest's provision/geth.sh on $(date -u +%FT%TZ): geth ${GETH_VERSION:-?}
 # ($(sha256sum "$GETH" | cut -c1-12)), ${CL:-the light client}, history from $HISTORY_START.
 NODE=$NAME
-SSH_CONFIG=$SSHCFG
+SSH_CONFIG=$(printf %q "$SSHCFG")
 VM=$NAME
 NETWORK=$NETWORK
 SERVICE=geth
@@ -218,4 +231,5 @@ FAULTS_OK=1
 EOF
 up() { [ -n "$(vm "curl -s -m 5 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_blockNumber\",\"params\":[]}' http://127.0.0.1:8545" 2>/dev/null)" ]; }
 wait_until 300 "geth's RPC on $NAME" up || die "geth doesn't answer on $NAME: see journalctl -u geth there"
+[ "$pin" = 0 ] || vm "echo '$cutoff' > /etc/node-crashtest/history-chain"
 log "$NAME: geth ${GETH_VERSION:-?} running (${CL:-light client}); node description $NODES/$NAME.env"
