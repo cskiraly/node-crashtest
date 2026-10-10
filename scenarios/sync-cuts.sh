@@ -41,10 +41,12 @@ PHASES=(
 	"at-the-head|Imported new chain segment|Chain head was updated"
 )
 
+FROM=$START # errors count from here: after the reset, with --reset
 if [ "$RESET" = 1 ]; then
 	ev "sync-cuts: deleting the node's database"
 	on "sudo -n systemctl stop '$SERVICE' && sudo -n find '$DATADIR/geth' -mindepth 1 -maxdepth 1 ! -name nodekey ! -name nodes -exec rm -rf {} + &&
 		sudo -n systemctl start '$SERVICE'" || not_run "could not reset the node's database"
+	FROM=$(now)
 else
 	line=$(watch_wait "$START" 120 'f["head"] ~ /^[0-9]+$/ && f["ref"] + 0 > 0') || not_run "no head from $NODE_NAME, or no reference"
 	sed -n 's/.* head=\([0-9]*\) .* ref=\([0-9]*\).*/\1 \2/p' <<<"$line" | { read -r h r; [ $((h + 64)) -lt "$r" ]; } ||
@@ -62,10 +64,12 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 	watch_wait "$(date -u -d '30 seconds ago' +%FT%T)" 0 "$CAUGHT_UP" >/dev/null && wait=1200
 	left=$(( DEADLINE - $(date +%s) ))
 	[ "$left" -ge "$wait" ] || wait=$left
-	if ! out=$("$CRASHTEST/faults/power-on-log.sh" "$NODE_NAME" "${pattern#|}" "$OFF" "$wait"); then
-		info phases "no further phase line within $wait s"
-		break
-	fi
+	out=$("$CRASHTEST/faults/power-on-log.sh" "$NODE_FILE" "${pattern#|}" "$OFF" "$wait")
+	case $? in
+	0) ;;
+	3) info phases "no further phase line within $wait s"; break ;;
+	*) fail phases "the power cut failed: $(tail -n 3 <<<"$out" | paste -sd' ')"; broken=1; break ;;
+	esac
 	end=$(now)
 	matched=$(sed -n 's/.*matched: //p' <<<"$out" | head -1)
 	phase=""
@@ -86,15 +90,14 @@ for p in "${PHASES[@]}"; do [ -n "${done_at[${p%%|*}]:-}" ] || info "${p%%|*}" "
 
 left=$(( DEADLINE - $(date +%s) ))
 if [ "$broken" = 1 ]; then
-	errors_check "$START"
+	errors_check "$FROM"
 elif line=$(watch_wait "$last" "$(( left > 60 ? left : 60 ))" "$CAUGHT_UP"); then
 	ok synced "synced and at the reference's head at ${line:0:20}, $(secs_from "$START" "$line") s after the start"
-	errors_check "$START"
-	head=$(node_head)
-	history_check "$(history_start)" "$head"
+	errors_check "$FROM"
+	if head=$(node_head); then history_check "$(history_start)" "$head"; else fail history "no head from the node"; fi
 	logs_check 3
 else
 	fail synced "not synced within the timeout"
-	errors_check "$START"
+	errors_check "$FROM"
 fi
 scenario_end

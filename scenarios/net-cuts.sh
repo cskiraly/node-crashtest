@@ -8,13 +8,13 @@
 #    following meanwhile (its blocks come from the endpoints): the scenario shows how far behind it
 #    fell.
 # After each: does the node get a head above the one before the outage within NEW_HEAD seconds, and
-# how soon is it at the reference's head again. Then its log.
+# how soon is it at the reference's head again. Then its log, and its history over the scenario.
 #
 #   scenarios/net-cuts.sh NODE [--link S] [--endpoints S] [--devp2p S] [--new-head S]
 #                         (defaults 1800, 900, 300; 0 skips an outage; --new-head default 300)
 #
 # Passes when the node has a new head within NEW_HEAD seconds after every outage and is at the
-# reference's head within 30 min, with no unexpected error in its log.
+# reference's head within 30 min, with no unexpected error in its log and its history intact.
 
 . "$(dirname "$0")/lib.sh"
 [ $# -ge 1 ] || { sed -n '3,18p' "$0"; exit 2; }
@@ -41,7 +41,8 @@ outage() {
 	shift 2
 	[ "$secs" -gt 0 ] || { info "$label" "skipped"; return 0; }
 	sleep 60
-	h=$(node_head)
+	h=$(node_head) || { fail "$label" "no head from the node before the outage"; return 1; }
+	[ -n "$first" ] || first=$h
 	start=$(now)
 	"$@" || { fail "$label" "the fault failed"; return 1; }
 	# How far behind the node fell while cut off (as far as the watcher could see it).
@@ -52,8 +53,12 @@ outage() {
 	after_fault "$label" "$(now)" "$h" 120 "$NEW_HEAD" 1800
 }
 
-outage link "$LINK" "$CRASHTEST/faults/link.sh" "$NODE_NAME" "$LINK"
-outage endpoints "$ENDPOINTS" "$CRASHTEST/faults/partial.sh" "$NODE_NAME" endpoints "$ENDPOINTS"
-outage devp2p "$DEVP2P" "$CRASHTEST/faults/partial.sh" "$NODE_NAME" devp2p "$DEVP2P"
+first="" all=1
+outage link "$LINK" "$CRASHTEST/faults/link.sh" "$NODE_FILE" "$LINK" || all=0
+outage endpoints "$ENDPOINTS" "$CRASHTEST/faults/partial.sh" "$NODE_FILE" endpoints "$ENDPOINTS" || all=0
+outage devp2p "$DEVP2P" "$CRASHTEST/faults/partial.sh" "$NODE_FILE" devp2p "$DEVP2P" || all=0
 errors_check "$START"
+if [ "$all" = 1 ] && [ -n "$first" ]; then
+	if last=$(node_head); then history_check "$((first - 32))" "$last"; else fail history "no head from the node"; fi
+fi
 scenario_end

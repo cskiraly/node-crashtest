@@ -29,12 +29,14 @@ scenario_start disk-full "$node"
 require_head 1800
 
 sleep 60
-h=$(node_head)
+h=$(node_head) || not_run "no head from the node"
 start=$(now)
-if "$CRASHTEST/faults/disk-full.sh" "$NODE_NAME" "$FOR"; then
+if "$CRASHTEST/faults/disk-full.sh" "$NODE_FILE" "$FOR"; then
 	after_fault disk "$(now)" "$h" 600 900 3600 && ok=1 || ok=0
 	errors_check "$START" "$start" "$(date -u -d "@$(( $(date -u -d "${AT_HEAD}Z" +%s) + 60 ))" +%FT%T)"
-	[ "$ok" = 0 ] || history_check "$((h - 32))" "$(node_head)"
+	if [ "$ok" = 1 ]; then
+		if last=$(node_head); then history_check "$((h - 32))" "$last"; else fail history "no head from the node"; fi
+	fi
 else
 	fail disk "the fault failed"
 fi

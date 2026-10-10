@@ -15,13 +15,15 @@ run directory, `~/.cache/node-crashtest/runs/NODE-SCENARIO-TIME/`.
 |---|---|---|---|
 | `sync-cuts.sh [--reset] [--off S] [--timeout H]` | a power cut at each phase of geth's sync, as the phase's first line appears: state download, chain download, state healing, the end of snap sync, log index rendering, the first block at the head (`--reset`: from an empty database) | the node runs again after every cut, finishes its sync and follows the chain; no unexpected error; history and log index intact | the sync, plus ~1 h of checks |
 | `power-cuts.sh [--cuts N] [--off S] [--gap S]` | power cuts at the head (default 3) | a new head within 15 min, at the reference's head within an hour, after each; no unexpected error; history intact. Shows how far back each cut set the node | ~15 min |
-| `net-cuts.sh [--link S] [--endpoints S] [--devp2p S] [--new-head S]` | the link down (default 30 min); the node's HTTP(S) out cut (its beacon API endpoints; 15 min); its peer-to-peer traffic cut (5 min) | a new head within `--new-head` (default 5 min) after each, at the reference's head within 30 min; no unexpected error. Shows how far behind it fell meanwhile | ~1 h |
+| `net-cuts.sh [--link S] [--endpoints S] [--devp2p S] [--new-head S]` | the link down (default 30 min); the node's HTTP(S) out cut (its beacon API endpoints; 15 min); its peer-to-peer traffic cut (5 min) | a new head within `--new-head` (default 5 min) after each, at the reference's head within 30 min; no unexpected error; history intact. Shows how far behind it fell meanwhile | ~1 h |
 | `disk-full.sh [--for S]` | the root file system full (default 2 min) | the node runs again by itself, a new head within 15 min, at the head within an hour; no unexpected error outside the fault; history intact | ~10 min |
-| `write-cut.sh [--file F] [--rounds N] [--keep-auto]` | a power cut right after the node rewrites a file (default: `WATCH_FILE`, a light client's checkpoint), ext4's `auto_da_alloc` off | a new head within 15 min, at the head within an hour, after each; no unexpected error | ~10 min per round |
+| `write-cut.sh [--file F] [--rounds N] [--keep-auto] [--wait S]` | a power cut right after the node rewrites a file (default: `WATCH_FILE`, a light client's checkpoint), ext4's `auto_da_alloc` off; the file must change within `--wait` (default 30 min) | a new head within 15 min, at the head within an hour, after each (from the boot); no unexpected error; history intact | ~10 min per round |
 
-"Running" means the service is active and the node's RPC answers: a node in a crash loop is active
-for a moment at every start. The scenarios that judge the node's log, and `sync-cuts.sh`'s phases,
-read geth's log lines; the faults and the other checks work for any client.
+Each limit counts from the end of the fault. "Running" means the service is active and the node's RPC
+answers: a node in a crash loop is active for a moment at every start. "No unexpected error": no
+ERROR, CRIT, `Fatal:` or panic line in the node's log but the known, harmless ones (`KNOWN_ERRORS` in
+`lib/common.sh`, each with its reason). The scenarios that judge the node's log, and `sync-cuts.sh`'s
+phases, read geth's log lines; the faults and the other checks work for any client.
 
 ## Writing one
 

@@ -32,11 +32,13 @@ require_head 1800
 first="" all=1
 for i in $(seq "$CUTS"); do
 	sleep "$GAP"
-	h=$(node_head)
+	h=$(node_head) || { fail "cut$i" "no head from the node before the cut"; all=0; break; }
 	[ -n "$first" ] || first=$h
-	"$CRASHTEST/faults/power.sh" "$NODE_NAME" "$OFF" || { fail "cut$i" "the power cut failed"; all=0; break; }
+	"$CRASHTEST/faults/power.sh" "$NODE_FILE" "$OFF" || { fail "cut$i" "the power cut failed"; all=0; break; }
 	after_fault "cut$i" "$(now)" "$h" 600 900 3600 || { all=0; break; }
 done
 errors_check "$START"
-[ "$all" = 0 ] || history_check "$((first - 32))" "$(node_head)"
+if [ "$all" = 1 ]; then
+	if last=$(node_head); then history_check "$((first - 32))" "$last"; else fail history "no head from the node"; fi
+fi
 scenario_end
