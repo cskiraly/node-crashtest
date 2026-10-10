@@ -161,4 +161,6 @@ history_start() {
 #   downloads them again.
 # - "Blobs unavailable, dropping reorged tx": a reorg put back a blob transaction whose blobs the node
 #   never had (it saw the transaction only in a block); the pool can't keep it.
-KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point|Truncating ancient chain|Blobs unavailable, dropping reorged tx'
+# - "Number of finalized block is missing": after a crash, the finalized block's marker can name a block
+#   whose number the database lost; the chain freezer waits for the next finalized block.
+KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point|Truncating ancient chain|Blobs unavailable, dropping reorged tx|Number of finalized block is missing'
