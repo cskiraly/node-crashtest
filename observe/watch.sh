@@ -19,7 +19,7 @@ RUN=${2:-$CRASHTEST_DIR/runs/$NODE_NAME-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$RUN"
 echo "$RUN" > "$CRASHTEST_DIR/current-$NODE_NAME"
 MAC=$(vm_mac)
-SSH=(ssh -o BatchMode=yes -o ConnectTimeout=5 -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/cm-crashtest-%C"
+SSH=("${NODE_SSH[@]}" -o BatchMode=yes -o ConnectTimeout=5 -o ControlMaster=auto -o "ControlPath=$CONTROL"
 	-o ControlPersist=120 -o ServerAliveInterval=5 -o ServerAliveCountMax=3 "$NODE")
 
 # One probe on the node: the state line, then eth_syncing, eth_blockNumber and net_peerCount (one JSON

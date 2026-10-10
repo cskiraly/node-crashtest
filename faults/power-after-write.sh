@@ -40,11 +40,11 @@ on "sudo -n bash -c 'm=\$(stat -c %y \"$FILE\"); while [ \"\$(stat -c %y \"$FILE
 	echo \"written \$saved, size \$(stat -c %s \"$FILE\"), committed at \$(date -u +%T.%N)\"'"
 "${VIRSH[@]}" destroy "$VM" >/dev/null || die "could not power off $VM"
 ev "power-after-write: power off $VM"
-ssh -O exit "$NODE" 2>/dev/null || true
+drop_shared
 sleep "$OFF"
 "${VIRSH[@]}" start "$VM" >/dev/null || die "could not start $VM"
 ev "power-after-write: power on $VM"
-up() { ssh -o ConnectTimeout=5 -o ControlPath=none -o BatchMode=yes "$NODE" true 2>/dev/null; }
+up() { "${NODE_SSH[@]}" -o ConnectTimeout=5 -o ControlPath=none -o BatchMode=yes "$NODE" true 2>/dev/null; }
 wait_until 300 "the VM's ssh" up || die "no ssh after the boot"
 # Before the service rewrites it: read it at once. (It may have, if it starts within seconds.)
 on "sudo -n stat -c 'after the boot: %s bytes, mtime %y' '$FILE'; printf 'content: '; sudo -n head -c 200 '$FILE'; echo"

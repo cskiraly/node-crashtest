@@ -52,21 +52,23 @@ rpc() {
 		-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":${3:-[]}}" "$1"
 }
 
-# load_node NAME_OR_FILE: the node's settings (NODE_NAME, NODE, VM, NETWORK, SERVICE, SERVICE_USER,
-# DATADIR, RPC, WATCH_FILE, HISTORY_START, HISTORY_START_CMD, FAULTS_OK), from
-# $CRASHTEST_CONFIG/nodes/NAME.env or from the file given; then REF, the reference's RPC, and RUN,
-# the node's current run directory (the watcher's), if any.
+# load_node NAME_OR_FILE: the node's settings (NODE_NAME, NODE, SSH_CONFIG, VM, NETWORK, SERVICE,
+# SERVICE_USER, DATADIR, RPC, WATCH_FILE, HISTORY_START, HISTORY_START_CMD, FAULTS_OK), from
+# $CRASHTEST_CONFIG/nodes/NAME.env or from the file given; then NODE_SSH, the ssh command for it;
+# REF, the reference's RPC; and RUN, the node's current run directory (the watcher's), if any.
 load_node() {
 	local f=$1
 	[[ $f == */* || $f == *.env ]] || f=$CRASHTEST_CONFIG/nodes/$1.env
 	[ -r "$f" ] || die "no node description $f (see lib/node.env.example)"
-	NODE="" VM="" NETWORK="" SERVICE=geth SERVICE_USER=geth DATADIR=/var/lib/geth RPC=http://127.0.0.1:8545
+	NODE="" SSH_CONFIG="" VM="" NETWORK="" SERVICE=geth SERVICE_USER=geth DATADIR=/var/lib/geth RPC=http://127.0.0.1:8545
 	WATCH_FILE="" HISTORY_START="" HISTORY_START_CMD="" FAULTS_OK=""
 	# shellcheck disable=SC1090
 	. "$f"
 	NODE_NAME=$(basename "$f" .env)
 	[ -n "$NODE" ] || die "$f: NODE (the ssh destination) is missing"
 	[ -n "$VM" ] || die "$f: VM (the libvirt domain) is missing"
+	NODE_SSH=(ssh)
+	[ -z "$SSH_CONFIG" ] || NODE_SSH+=(-F "$SSH_CONFIG")
 	REF=$(reference_rpc "$NETWORK") || die "$f: NETWORK '$NETWORK' has no reference RPC"
 	RUN=$(cat "$CRASHTEST_DIR/current-$NODE_NAME" 2>/dev/null || true)
 }
@@ -85,7 +87,17 @@ ev() {
 }
 
 # on COMMAND: run COMMAND on the node (a shell command line, over ssh).
-on() { ssh -o BatchMode=yes "$NODE" "$@"; }
+on() { "${NODE_SSH[@]}" -o BatchMode=yes "$NODE" "$@"; }
+
+# The watcher's shared ssh connection to the node (CONTROL), and one the node's ssh config may share
+# (ControlMaster): after a power cut, ssh through them would hang until their keepalives give up, if
+# they have any. Faults that cut the power close both at once (drop_shared).
+CONTROL="$HOME/.ssh/cm-crashtest-%C"
+drop_shared() {
+	"${NODE_SSH[@]}" -o "ControlPath=$CONTROL" -O exit "$NODE" 2>/dev/null
+	"${NODE_SSH[@]}" -O exit "$NODE" 2>/dev/null
+	true
+}
 
 # node_rpc METHOD [PARAMS]: a JSON-RPC call to the node, made on the node.
 node_rpc() {

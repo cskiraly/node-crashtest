@@ -13,7 +13,7 @@ OFF=${2:-30}
 
 ev "power off $VM"
 "${VIRSH[@]}" destroy "$VM" >/dev/null || die "could not power off $VM"
-ssh -O exit "$NODE" 2>/dev/null || true # a shared ssh connection died with the VM
+drop_shared
 sleep "$OFF"
 "${VIRSH[@]}" start "$VM" >/dev/null || die "could not start $VM"
 ev "power on $VM (off ${OFF} s)"
