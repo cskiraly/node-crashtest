@@ -54,12 +54,14 @@ rpc() {
 
 # load_node NAME_OR_FILE: the node's settings (NODE_NAME, NODE, SSH_CONFIG, VM, NETWORK, SERVICE,
 # SERVICE_USER, DATADIR, RPC, WATCH_FILE, HISTORY_START, HISTORY_START_CMD, FAULTS_OK), from
-# $CRASHTEST_CONFIG/nodes/NAME.env or from the file given; then NODE_SSH, the ssh command for it;
-# REF, the reference's RPC; and RUN, the node's current run directory (the watcher's), if any.
+# $CRASHTEST_CONFIG/nodes/NAME.env or from the file given; then NODE_FILE, that file (what a script
+# passes on to the scripts it runs); NODE_SSH, the ssh command for the node; REF, the reference's RPC;
+# and RUN, the node's current run directory (the watcher's), if any.
 load_node() {
 	local f=$1
 	[[ $f == */* || $f == *.env ]] || f=$CRASHTEST_CONFIG/nodes/$1.env
 	[ -r "$f" ] || die "no node description $f (see lib/node.env.example)"
+	NODE_FILE=$(readlink -f "$f")
 	NODE="" SSH_CONFIG="" VM="" NETWORK="" SERVICE=geth SERVICE_USER=geth DATADIR=/var/lib/geth RPC=http://127.0.0.1:8545
 	WATCH_FILE="" HISTORY_START="" HISTORY_START_CMD="" FAULTS_OK=""
 	# shellcheck disable=SC1090
@@ -73,9 +75,19 @@ load_node() {
 	RUN=$(cat "$CRASHTEST_DIR/current-$NODE_NAME" 2>/dev/null || true)
 }
 
-# faults_allowed: refuse to touch a node that isn't marked as a test node (FAULTS_OK=1).
+# faults_allowed: refuse to touch a node that isn't marked as a test node (FAULTS_OK=1), or whose ssh
+# destination isn't its VM: power and link faults go to the VM through libvirt, the others (iptables,
+# a full disk, a database reset) over ssh, so both must reach the same machine. (Checked while the VM
+# has an address libvirt knows: its DHCP lease on a NAT network.)
 faults_allowed() {
 	[ "${FAULTS_OK:-}" = 1 ] || die "$NODE_NAME isn't marked as a test node (FAULTS_OK=1 in its env file); no faults on it"
+	local host addrs
+	addrs=$("${VIRSH[@]}" domifaddr "$VM" 2>/dev/null | awk '/ipv4/ { split($4, a, "/"); print a[1] }')
+	[ -n "$addrs" ] || return 0
+	host=$("${NODE_SSH[@]}" -G "$NODE" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')
+	[[ $host =~ ^[0-9.]+$ ]] || host=$(getent ahostsv4 "$host" | awk 'NR == 1 { print $1 }')
+	grep -qxF "${host:-none}" <<<"$addrs" ||
+		die "$NODE_NAME: ssh reaches $NODE at ${host:-an unknown address}, but the VM $VM is at $(paste -sd' ' <<<"$addrs"): not the same machine; no faults"
 }
 
 # ev TEXT...: an event, with UTC time to the millisecond, to stdout and the run's events.log.
@@ -86,8 +98,22 @@ ev() {
 	[ -z "${RUN:-}" ] || echo "$line" >> "$RUN/events.log"
 }
 
-# on COMMAND: run COMMAND on the node (a shell command line, over ssh).
-on() { "${NODE_SSH[@]}" -o BatchMode=yes "$NODE" "$@"; }
+# on COMMAND: run COMMAND on the node (a shell command line, over ssh). A refused connection is tried
+# again, 6 times 10 s apart: the node's firewall may limit new ssh connections (to 6 in 30 s, say),
+# which a fault's checks right after a boot can exceed. Nothing ran on the node then, so this is
+# safe for any command.
+on() {
+	local err rc i
+	err=$(mktemp)
+	for i in 1 2 3 4 5 6; do
+		"${NODE_SSH[@]}" -o BatchMode=yes "$NODE" "$@" 2>"$err" && rc=0 || rc=$?
+		[ "$rc" = 255 ] && [ "$i" -lt 6 ] && grep -q 'Connection refused' "$err" && { sleep 10; continue; }
+		break
+	done
+	cat "$err" >&2
+	rm -f "$err"
+	return "$rc"
+}
 
 # The watcher's shared ssh connection to the node (CONTROL), and one the node's ssh config may share
 # (ControlMaster): after a power cut, ssh through them would hang until their keepalives give up, if
@@ -120,4 +146,14 @@ history_start() {
 # - "Beacon backfilling failed ... syncing canceled (requested)": the downloader restarted its own sync
 #   cycle (a new head with a gap); it carries on at once.
 # - "Reject duplicated disable operation": pathdb, at every start during a snap sync.
-KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation'
+# - "SetHead invalidated finalized block": after a crash, the state rewinds to what pathdb had written
+#   to disk, which can be thousands of blocks back (it keeps up to 256 MB of recent state in memory),
+#   past the finalized block; geth carries on from there. The scenarios show the rewind.
+# - "Corrupted index item detected": after a crash, the unsynced end of a freezer table's index can hold
+#   zeros; geth truncates it at startup and downloads that part again (the freezer's own repair).
+# - "Failed NewPayload/ForkchoiceUpdated ... context deadline exceeded": blsync gives geth 5 s to answer
+#   each engine API call, which a node busy syncing can exceed; the next head follows.
+# - "Log index initialization failed ... cannot start indexing before history cutoff point": a geth
+#   without go-ethereum#35875 builds no log index on a node whose history starts at a custom cutoff
+#   (provision/geth.sh's default); eth_getLogs still answers, unindexed (checks/logs.sh compares it).
+KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point'

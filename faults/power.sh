@@ -13,6 +13,7 @@ OFF=${2:-30}
 
 ev "power off $VM"
 "${VIRSH[@]}" destroy "$VM" >/dev/null || die "could not power off $VM"
+trap '"${VIRSH[@]}" start "$VM" >/dev/null 2>&1; ev "power on $VM (interrupted)"; exit 1' INT TERM
 drop_shared
 sleep "$OFF"
 "${VIRSH[@]}" start "$VM" >/dev/null || die "could not start $VM"

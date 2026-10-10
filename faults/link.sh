@@ -13,7 +13,9 @@ FOR=$2
 MAC=$(vm_mac)
 [ -n "$MAC" ] || die "no network interface on $VM"
 
-up() { "${VIRSH[@]}" domif-setlink "$VM" "$MAC" up >/dev/null; }
+# up: the link up again, and shared ssh connections closed: during a long outage the node's sshd may
+# have dropped them without the client side noticing.
+up() { "${VIRSH[@]}" domif-setlink "$VM" "$MAC" up >/dev/null && drop_shared; }
 trap 'up; ev "link up $VM (interrupted)"; exit 1' INT TERM
 ev "link down $VM"
 "${VIRSH[@]}" domif-setlink "$VM" "$MAC" down >/dev/null || die "could not take the link of $VM down"

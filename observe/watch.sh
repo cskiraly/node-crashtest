@@ -49,9 +49,9 @@ journal() {
 	while :; do
 		since=$(grep -E '^20[0-9]{2}-' "$RUN/node.log" 2>/dev/null | tail -1 | cut -c1-19 | tr T ' ')
 		if [ -n "$since" ]; then
-			"${SSH[@]}" "sudo -n journalctl -fu '$SERVICE' -o short-iso-precise --no-hostname --since '$since UTC'" >> "$RUN/node.log" 2>> "$RUN/watch.err"
+			"${SSH[@]}" "sudo -n journalctl -fu '$SERVICE' -o short-iso-precise --utc --no-hostname --since '$since UTC'" >> "$RUN/node.log" 2>> "$RUN/watch.err"
 		else
-			"${SSH[@]}" "sudo -n journalctl -fu '$SERVICE' -o short-iso-precise --no-hostname -n 200" >> "$RUN/node.log" 2>> "$RUN/watch.err"
+			"${SSH[@]}" "sudo -n journalctl -fu '$SERVICE' -o short-iso-precise --utc --no-hostname -n 200" >> "$RUN/node.log" 2>> "$RUN/watch.err"
 		fi
 		sleep 5
 	done
