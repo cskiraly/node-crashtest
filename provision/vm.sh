@@ -55,6 +55,9 @@ create() {
 		esac
 	done
 	[[ $name =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "NAME: lower-case letters, digits and dashes"
+	command -v virt-install >/dev/null || die "no virt-install (Debian, Ubuntu: apt install virtinst)"
+	"${VIRSH[@]}" pool-info default >/dev/null 2>&1 || die "libvirt has no storage pool 'default'"
+	"${VIRSH[@]}" net-info default >/dev/null 2>&1 || die "libvirt has no network 'default' (its NAT network)"
 	"${VIRSH[@]}" dominfo "$name" >/dev/null 2>&1 && die "a VM named $name exists already"
 	"${VIRSH[@]}" vol-info "$name.qcow2" --pool default >/dev/null 2>&1 && die "a disk $name.qcow2 exists already"
 	mkdir -p "$NODES"
@@ -74,10 +77,14 @@ users:
     ssh_authorized_keys:
       - $(cat "$KEY.pub")
 EOF
-	virt-install --connect qemu:///system --name "$name" --metadata "description=$MARK" \
+	if ! virt-install --connect qemu:///system --name "$name" --metadata "description=$MARK" \
 		--memory "$mem" --vcpus "$cpus" --disk "vol=default/$name.qcow2,discard=unmap" --import \
 		--os-variant ubuntu24.04 --network network=default --cloud-init "user-data=$ud" \
-		--noautoconsole --graphics none >/dev/null
+		--noautoconsole --graphics none >/dev/null; then
+		rm -f "$ud"
+		"${VIRSH[@]}" vol-delete "$name.qcow2" --pool default >/dev/null 2>&1
+		die "virt-install failed; $name's disk deleted"
+	fi
 	rm -f "$ud"
 	for _ in $(seq 60); do ip=$(vm_ip "$name"); [ -n "$ip" ] && break; sleep 5; done
 	[ -n "$ip" ] || die "$name got no address"

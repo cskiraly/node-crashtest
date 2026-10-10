@@ -44,8 +44,9 @@ PHASES=(
 FROM=$START # errors count from here: after the reset, with --reset
 if [ "$RESET" = 1 ]; then
 	ev "sync-cuts: deleting the node's database"
-	on "sudo -n systemctl stop '$SERVICE' && sudo -n find '$DATADIR/geth' -mindepth 1 -maxdepth 1 ! -name nodekey ! -name nodes -exec rm -rf {} + &&
-		sudo -n systemctl start '$SERVICE'" || not_run "could not reset the node's database"
+	# The service starts again whatever the deletion did.
+	on "sudo -n systemctl stop '$SERVICE' && { sudo -n find '$DATADIR/geth' -mindepth 1 -maxdepth 1 ! -name nodekey ! -name nodes -exec rm -rf {} +
+		rc=\$?; sudo -n systemctl start '$SERVICE'; exit \$rc; }" || not_run "could not reset the node's database"
 	FROM=$(now)
 else
 	line=$(watch_wait "$START" 120 'f["head"] ~ /^[0-9]+$/ && f["ref"] + 0 > 0') || not_run "no head from $NODE_NAME, or no reference"
@@ -88,10 +89,12 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 done
 for p in "${PHASES[@]}"; do [ -n "${done_at[${p%%|*}]:-}" ] || info "${p%%|*}" "no cut (the phase didn't come up while the scenario watched)"; done
 
+# Synced by the deadline: what the watcher saw until then counts, nothing after it.
 left=$(( DEADLINE - $(date +%s) ))
 if [ "$broken" = 1 ]; then
 	errors_check "$FROM"
-elif line=$(watch_wait "$last" "$(( left > 60 ? left : 60 ))" "$CAUGHT_UP"); then
+elif line=$(watch_wait "$last" "$(( left > 0 ? left : 0 ))" "$CAUGHT_UP") &&
+	[ "$(date -u -d "${line:0:19}Z" +%s)" -le "$DEADLINE" ]; then
 	ok synced "synced and at the reference's head at ${line:0:20}, $(secs_from "$START" "$line") s after the start"
 	errors_check "$FROM"
 	if head=$(node_head); then history_check "$(history_start)" "$head"; else fail history "no head from the node"; fi

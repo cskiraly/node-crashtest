@@ -31,21 +31,35 @@ devp2p)
 *) sed -n '3,13p' "$0"; exit 2 ;;
 esac
 
-# The commands for the node: set up (or take down) the chains in both families.
-up="" down=""
+# The commands for the node: set up the chains in both families (stopping at the first failure), and
+# take them down (whatever there is of them; it fails unless they're gone). -w: wait for the xtables
+# lock, which another firewall update may hold.
+up="set -e;" down="" gone=""
 for t in iptables ip6tables; do
-	up="$up $t -N crashtest-out; $t -N crashtest-in; $t -A crashtest-out -o lo -j RETURN;"
-	while IFS= read -r r; do [ -z "$r" ] || up="$up $t -A crashtest-out -m owner --uid-owner $SERVICE_USER $r;"; done <<<"$OUT"
-	while IFS= read -r r; do [ -z "$r" ] || up="$up $t -A crashtest-in $r;"; done <<<"$IN"
-	up="$up $t -I OUTPUT 1 -j crashtest-out; $t -I INPUT 1 -j crashtest-in;"
-	down="$down $t -D OUTPUT -j crashtest-out; $t -D INPUT -j crashtest-in; $t -F crashtest-out; $t -X crashtest-out; $t -F crashtest-in; $t -X crashtest-in;"
+	T="$t -w 10"
+	up="$up $T -N crashtest-out; $T -N crashtest-in; $T -A crashtest-out -o lo -j RETURN;"
+	while IFS= read -r r; do [ -z "$r" ] || up="$up $T -A crashtest-out -m owner --uid-owner $SERVICE_USER $r;"; done <<<"$OUT"
+	while IFS= read -r r; do [ -z "$r" ] || up="$up $T -A crashtest-in $r;"; done <<<"$IN"
+	up="$up $T -I OUTPUT 1 -j crashtest-out; $T -I INPUT 1 -j crashtest-in;"
+	for c in out:OUTPUT in:INPUT; do
+		down="$down while $T -D ${c#*:} -j crashtest-${c%:*} 2>/dev/null; do :; done; $T -F crashtest-${c%:*} 2>/dev/null; $T -X crashtest-${c%:*} 2>/dev/null;"
+		gone="$gone ! $T -n -L crashtest-${c%:*} >/dev/null 2>&1 &&"
+	done
 done
+down="$down $gone true"
 
 unit=crashtest-uncut-$$
-on "sudo -n sh -c '$down' 2>/dev/null; sudo -n systemd-run -q --unit=$unit --on-active=$((FOR + 60)) /bin/sh -c '$down' && sudo -n sh -c '$up'" ||
+# restore: the rules taken down; then, only once they're gone, the VM's own cleanup cancelled.
+restore() { on "sudo -n sh -c '$down'" && on "sudo -n systemctl stop $unit.timer 2>/dev/null; true"; }
+on "sudo -n sh -c '$down'" || die "could not remove an earlier cut's rules"
+on "sudo -n systemd-run -q --unit=$unit --on-active=$((FOR + 60)) /bin/sh -c '$down'" || die "could not arm the cleanup"
+if ! on "sudo -n sh -c '$up'"; then
+	restore || log "the rules may still be there: the VM removes them by itself within $((FOR + 60)) s"
 	die "could not set up the cut"
-trap 'on "sudo -n sh -c \"$down\" 2>/dev/null; sudo -n systemctl stop $unit.timer 2>/dev/null; true"; ev "partial cut ($MODE) on $NODE_NAME restored (interrupted)"; exit 1' INT TERM
+fi
+trap 'restore && ev "partial cut ($MODE) on $NODE_NAME restored (interrupted)" ||
+	ev "partial cut ($MODE) on $NODE_NAME: could not restore; the VM does within $((FOR + 60)) s"; exit 1' INT TERM
 ev "partial cut ($MODE) on $NODE_NAME"
 sleep "$FOR"
-on "sudo -n sh -c '$down'; sudo -n systemctl stop $unit.timer 2>/dev/null; true"
+restore || { ev "partial cut ($MODE) on $NODE_NAME: could not restore; the VM does within 60 s"; exit 1; }
 ev "partial cut ($MODE) on $NODE_NAME restored (cut ${FOR} s)"

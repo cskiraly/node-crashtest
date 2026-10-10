@@ -21,8 +21,9 @@ scenarios/write-cut.sh t-node
 provision/vm.sh delete t-node
 ```
 
-Each scenario prints OK/FAIL lines, exits 0 when all passed, and keeps its logs in
-`~/.cache/node-crashtest/runs/`. What each one does: `scenarios/README.md`.
+The geth must be v1.17.7 or later, for the history the provisioner keeps by default (50,000 blocks);
+an older one with `--history all`. Each scenario prints OK/FAIL lines, exits 0 when all passed, and
+keeps its logs in `~/.cache/node-crashtest/runs/`. What each one does: `scenarios/README.md`.
 
 ## Layout
 
@@ -37,8 +38,9 @@ Each scenario prints OK/FAIL lines, exits 0 when all passed, and keeps its logs 
 
 ## Requirements
 
-A Linux host with libvirt and KVM, `ssh`, `curl` and `jq`. A node's VM image grows to its whole disk
-size over time (100 GB for a Hoodi node): check the free space first.
+A Linux host with KVM and libvirt (`virsh`, `virt-install`, the storage pool `default` and the NAT
+network `default`), `ssh`, `curl` and `jq`. A node's VM image grows to its whole disk size over time
+(100 GB for a Hoodi node): check the free space first.
 
 ## Status
 

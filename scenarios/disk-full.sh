@@ -35,7 +35,7 @@ if "$CRASHTEST/faults/disk-full.sh" "$NODE_FILE" "$FOR"; then
 	after_fault disk "$(now)" "$h" 600 900 3600 && ok=1 || ok=0
 	errors_check "$START" "$start" "$(date -u -d "@$(( $(date -u -d "${AT_HEAD}Z" +%s) + 60 ))" +%FT%T)"
 	if [ "$ok" = 1 ]; then
-		if last=$(node_head); then history_check "$((h - 32))" "$last"; else fail history "no head from the node"; fi
+		if last=$(node_head); then history_check "$((h - 96))" "$last"; else fail history "no head from the node"; fi
 	fi
 else
 	fail disk "the fault failed"

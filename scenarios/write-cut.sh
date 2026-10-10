@@ -42,7 +42,9 @@ for i in $(seq "$ROUNDS"); do
 	out=$("$CRASHTEST/faults/power-after-write.sh" "$NODE_FILE" "$FILE" $NOAUTO --off 5 --timeout "$WAIT")
 	case $? in
 	0) ;;
-	3) fail "cut$i" "$FILE didn't change within $WAIT s: no cut"; all=0; break ;;
+	3) # Nothing tested: the node didn't write the file (a light client's checkpoint waits for finality).
+		[ "$i" != 1 ] || not_run "$FILE didn't change within $WAIT s: no cut"
+		info "cut$i" "$FILE didn't change within $WAIT s: no further cut"; break ;;
 	*) fail "cut$i" "the fault failed: $(tail -n 3 <<<"$out" | paste -sd' ')"; all=0; break ;;
 	esac
 	info "cut$i" "$(grep -E '^(written|after the boot|content)' <<<"$out" | paste -sd' ')"
@@ -57,6 +59,6 @@ for i in $(seq "$ROUNDS"); do
 done
 errors_check "$START"
 if [ "$all" = 1 ] && [ -n "$first" ]; then
-	if last=$(node_head); then history_check "$((first - 32))" "$last"; else fail history "no head from the node"; fi
+	if last=$(node_head); then history_check "$((first - 96))" "$last"; else fail history "no head from the node"; fi
 fi
 scenario_end

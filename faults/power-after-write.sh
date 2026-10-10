@@ -32,22 +32,35 @@ while [ $# -gt 0 ]; do
 done
 
 on "sudo -n test -f '$FILE'" || die "no file $FILE on $NODE"
-[ "$NOAUTO" = 0 ] || on 'sudo -n mount -o remount,noauto_da_alloc / && findmnt -n -o OPTIONS /'
+# Until the power is off, on any exit: stop the wait, here and on the node (by its name; [l]: not this
+# command's own), and mount / with auto_da_alloc again if it was turned off here.
+waiter=""
+restore() {
+	[ -z "$waiter" ] || { pkill -P "$waiter" 2>/dev/null; kill "$waiter" 2>/dev/null; }
+	on "sudo -n pkill -f 'crashtest-pol[l]-$$'; true"
+	[ "$NOAUTO" = 0 ] || on 'sudo -n mount -o remount,auto_da_alloc /' ||
+		log "/ on $NODE may still be mounted with noauto_da_alloc, until its next boot"
+}
+trap restore EXIT
+trap 'exit 1' INT TERM
+[ "$NOAUTO" = 0 ] || on 'sudo -n mount -o remount,noauto_da_alloc /' || die "could not remount / with noauto_da_alloc"
 ev "power-after-write: waiting for $FILE to change (noauto=$NOAUTO fsync=$FSYNC; $(on findmnt -n -o OPTIONS /))"
 # On the node: poll the mtime every 50 ms, for TIMEOUT at most (exit 3); on a change, optionally fsync
 # another file (a journal commit), print the time and return. The power goes off as soon as ssh returns.
-rc=0
+# In the background, so that an interrupt ends the wait at once.
 on "sudo -n bash -c 'm=\$(stat -c %y \"$FILE\"); end=\$((\$(date +%s) + $TIMEOUT))
 	while [ \"\$(stat -c %y \"$FILE\")\" = \"\$m\" ]; do [ \$(date +%s) -lt \$end ] || exit 3; sleep 0.05; done
 	saved=\$(stat -c %y \"$FILE\")
 	[ $FSYNC = 1 ] && echo x | dd of=/var/tmp/crashtest-fsync conv=fsync status=none
-	echo \"written \$saved, size \$(stat -c %s \"$FILE\"), committed at \$(date -u +%T.%N)\"'" || rc=$?
-if [ "$rc" != 0 ]; then
-	[ "$NOAUTO" = 0 ] || on 'sudo -n mount -o remount,auto_da_alloc /'
-	[ "$rc" = 3 ] && { ev "power-after-write: $FILE didn't change within $TIMEOUT s; no cut"; exit 3; }
-	die "the wait for $FILE failed"
-fi
+	echo \"written \$saved, size \$(stat -c %s \"$FILE\"), committed at \$(date -u +%T.%N)\"' crashtest-poll-$$" &
+waiter=$!
+rc=0
+wait "$waiter" || rc=$?
+waiter=""
+[ "$rc" != 3 ] || { ev "power-after-write: $FILE didn't change within $TIMEOUT s; no cut"; exit 3; }
+[ "$rc" = 0 ] || die "the wait for $FILE failed"
 "${VIRSH[@]}" destroy "$VM" >/dev/null || die "could not power off $VM"
+trap - EXIT
 trap '"${VIRSH[@]}" start "$VM" >/dev/null 2>&1; ev "power-after-write: power on $VM (interrupted)"; exit 1' INT TERM
 ev "power-after-write: power off $VM"
 drop_shared

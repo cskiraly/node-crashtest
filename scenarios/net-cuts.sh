@@ -59,6 +59,6 @@ outage endpoints "$ENDPOINTS" "$CRASHTEST/faults/partial.sh" "$NODE_FILE" endpoi
 outage devp2p "$DEVP2P" "$CRASHTEST/faults/partial.sh" "$NODE_FILE" devp2p "$DEVP2P" || all=0
 errors_check "$START"
 if [ "$all" = 1 ] && [ -n "$first" ]; then
-	if last=$(node_head); then history_check "$((first - 32))" "$last"; else fail history "no head from the node"; fi
+	if last=$(node_head); then history_check "$((first - 96))" "$last"; else fail history "no head from the node"; fi
 fi
 scenario_end

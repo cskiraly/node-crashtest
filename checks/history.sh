@@ -1,53 +1,81 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 # The node's history after faults: no gap, nothing that differs from the chain. For every block
-# FROM..TO on the node: the block (hash, transactions) and its receipts (one per transaction); every
-# STEP-th block, the first and the last also against the reference: the same hash and the same
-# receipts (a digest of status, cumulative gas and logs).
+# FROM..TO on the node: the block (hash, transactions) and its receipts (one per transaction, all of
+# that block). Every STEP-th block, the first and the last also against the reference, up to the
+# reference's finalized block (above it, a reorg may change a block between the two reads): the same
+# hash and the same receipts (a digest of status, cumulative gas and logs). A block the reference
+# doesn't answer for stays uncompared (INFO); the check fails if none was compared.
 #
 #   checks/history.sh NODE FROM TO [STEP]   (default STEP 100)
 
 . "$(dirname "$0")/../lib/common.sh"
 set -u
-[ $# -ge 3 ] || { sed -n '3,8p' "$0"; exit 2; }
+[ $# -ge 3 ] || { sed -n '3,10p' "$0"; exit 2; }
 load_node "$1"
 FROM=$2 TO=$3 STEP=${4:-100}
 OUT=$(mktemp)
 trap 'rm -f "$OUT"' EXIT
+# What the digest covers, of a block's receipts: the same on the node and here.
+RECEIPTS='[.[] | [.status, .cumulativeGasUsed, [.logs[] | [.address, .topics, .data]]]] | tojson'
 
-# On the node, one ssh session: "number hash txs receipts digest" per block, or "number missing …".
-on "FROM=$FROM TO=$TO RPC='$RPC' bash -s" > "$OUT" <<'NODE_END'
+# On the node, one ssh session: "number hash txs receipts digest" per block, or "number missing …",
+# or "number other-block …" (receipts of another block, twice).
+on "FROM=$FROM TO=$TO RPC='$RPC' RECEIPTS='$RECEIPTS' bash -s" > "$OUT" <<'NODE_END' || fail node "the read on the node failed"
 r() { curl -s -m 20 -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" "$RPC"; }
 for ((n = FROM; n <= TO; n++)); do
 	h=$(printf 0x%x "$n")
-	b=$(r eth_getBlockByNumber "[\"$h\",false]" | jq -r '.result | if . == null then "null" else "\(.hash) \(.transactions | length)" end')
-	rc=$(r eth_getBlockReceipts "[\"$h\"]" | jq -c '.result | if . == null then null else [.[] | [.status, .cumulativeGasUsed, [.logs[] | [.address, .topics, .data]]]] end')
-	if [ "$b" = null ] || [ "$rc" = null ]; then echo "$n missing block=$b receipts=${rc:0:20}"; continue; fi
-	echo "$n $b $(jq length <<<"$rc") $(sha256sum <<<"$rc" | cut -c1-12)"
+	# Twice at most: a reorg between the two reads pairs a block with another block's receipts.
+	for try in 1 2; do
+		b=$(r eth_getBlockByNumber "[\"$h\",false]" | jq -r '.result | select(type == "object") | "\(.hash) \(.transactions | length)"' 2>/dev/null)
+		rc=$(r eth_getBlockReceipts "[\"$h\"]" | jq -r ".result | select(type == \"array\") | \"\([.[].blockHash] | unique | join(\",\"))|\(length)|\($RECEIPTS)\"" 2>/dev/null)
+		IFS='|' read -r rh cnt dj <<<"$rc"
+		[ -n "$rh" ] && [ -n "$b" ] && [ "$rh" != "${b%% *}" ] || break
+	done
+	if ! [[ $b =~ ^0x[0-9a-f]{64}\ [0-9]+$ ]] || ! [[ $cnt =~ ^[0-9]+$ ]]; then
+		echo "$n missing block=${b:-none} receipts=${cnt:-none}"
+	elif [ -n "$rh" ] && [ "$rh" != "${b%% *}" ]; then
+		echo "$n other-block block=${b%% *} receipts=$rh"
+	else
+		echo "$n $b $cnt $(sha256sum <<<"$dj" | cut -c1-12)"
+	fi
 done
 NODE_END
 
-missing=$(grep -c ' missing ' "$OUT")
-bad=$(awk '$3 != $4 && $2 != "missing"' "$OUT" | wc -l)
-total=$(grep -c . "$OUT")
-check blocks "$((TO - FROM + 1))" "$total" "$total blocks read from the node"
-check gaps 0 "$missing" "no block or receipts missing in $FROM-$TO"
+# Rows in order, one per block; complete ones; and those with a receipt count that isn't the
+# block's transaction count.
+rows=$(awk -v f="$FROM" '$1 == f + NR - 1' "$OUT" | wc -l)
+good=$(awk '$2 ~ /^0x[0-9a-f]{64}$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9a-f]{12}$/' "$OUT" | wc -l)
+bad=$(awk '$2 ~ /^0x/ && $3 != $4' "$OUT" | wc -l)
+check blocks "$((TO - FROM + 1))" "$rows" "$rows blocks read from the node"
+check gaps 0 "$((rows - good))" "no block or receipts missing in $FROM-$TO"
 check receipts 0 "$bad" "one receipt per transaction"
-[ "$missing" = 0 ] || grep ' missing ' "$OUT" | head -5
+[ "$rows" = "$good" ] || grep -v ' 0x[0-9a-f]* [0-9]* [0-9]* [0-9a-f]*$' "$OUT" | head -5
 
-diffs=0 compared=0
+fin=$(ref_rpc eth_getBlockByNumber '["finalized",false]' | jq -r '.result.number // empty' 2>/dev/null) || true
+[[ $fin =~ ^0x[0-9a-f]+$ ]] || { fail reference "no finalized block from the reference ($REF)"; finish; }
+fin=$((fin))
+diffs=0 compared=0 unavailable=0
 while read -r n hash _ _ digest; do
-	[ "$hash" = missing ] && continue
-	if [ $(( (n - FROM) % STEP )) = 0 ] || [ "$n" = "$TO" ]; then
+	[[ $hash == 0x* ]] && [ "$n" -le "$fin" ] || continue
+	if [ $(( (n - FROM) % STEP )) = 0 ] || [ "$n" = "$TO" ] || [ "$n" = "$fin" ]; then
 		h=$(printf 0x%x "$n")
-		rh=$(rpc "$REF" eth_getBlockByNumber "[\"$h\",false]" | jq -r '.result.hash')
-		rrc=$(rpc "$REF" eth_getBlockReceipts "[\"$h\"]" | jq -c '[.result[] | [.status, .cumulativeGasUsed, [.logs[] | [.address, .topics, .data]]]]')
-		rd=$(sha256sum <<<"$rrc" | cut -c1-12)
+		if ! rb=$(ref_rpc eth_getBlockByNumber "[\"$h\",false]") || ! rr=$(ref_rpc eth_getBlockReceipts "[\"$h\"]"); then
+			unavailable=$((unavailable + 1))
+			continue
+		fi
+		rh=$(jq -r '.result.hash' <<<"$rb")
+		rd=$(jq -r ".result | $RECEIPTS" <<<"$rr" | sha256sum | cut -c1-12)
 		compared=$((compared + 1))
 		if [ "$rh" != "$hash" ] || [ "$rd" != "$digest" ]; then
 			diffs=$((diffs + 1)); echo "  block $n: node $hash/$digest, reference $rh/$rd"
 		fi
 	fi
 done < "$OUT"
-check reference 0 "$diffs" "$compared blocks compared with the reference (hash and receipts)"
+[ "$unavailable" = 0 ] || info reference "$unavailable blocks not compared: the reference didn't answer"
+if [ "$compared" = 0 ]; then
+	fail reference "no block compared with the reference (its finalized block: $fin)"
+else
+	check reference 0 "$diffs" "$compared blocks compared with the reference (hash and receipts), up to block $((TO < fin ? TO : fin))"
+fi
 finish

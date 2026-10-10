@@ -13,10 +13,11 @@ VIRSH=(virsh -c qemu:///system)
 log() { printf '%s %s\n' "$(date +%T)" "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-# Results: one line per check; `finish` prints the verdict and exits 1 if any failed.
+# Results: one line per check (OK, FAIL, or INFO); `finish` prints the verdict and exits 1 if any failed.
 FAILED=0
 ok() { printf 'OK   %-14s %s\n' "$1" "$2"; }
 fail() { printf 'FAIL %-14s %s\n' "$1" "$2"; FAILED=1; }
+info() { printf 'INFO %-14s %s\n' "$1" "$2"; } # measured or noted, not judged
 check() { # NAME EXPECTED ACTUAL [DETAIL]
 	if [ "$2" = "$3" ]; then ok "$1" "${4:-$3}"; else fail "$1" "expected '$2', got '$3'"; fi
 }
@@ -52,6 +53,19 @@ rpc() {
 		-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":${3:-[]}}" "$1"
 }
 
+# ref_rpc METHOD [PARAMS]: a JSON-RPC call to the reference (REF), tried up to 3 times, 10 s apart,
+# while its reply has no result (public endpoints limit request rates); the last reply. Fails if none
+# had a result.
+ref_rpc() {
+	local r i
+	for i in 1 2 3; do
+		r=$(rpc "$REF" "$@") && jq -e 'has("result")' <<<"$r" >/dev/null 2>&1 && { echo "$r"; return 0; }
+		[ "$i" = 3 ] || sleep 10
+	done
+	echo "$r"
+	return 1
+}
+
 # load_node NAME_OR_FILE: the node's settings (NODE_NAME, NODE, SSH_CONFIG, VM, NETWORK, SERVICE,
 # SERVICE_USER, DATADIR, RPC, WATCH_FILE, HISTORY_START, HISTORY_START_CMD, FAULTS_OK), from
 # $CRASHTEST_CONFIG/nodes/NAME.env or from the file given; then NODE_FILE, that file (what a script
@@ -75,19 +89,30 @@ load_node() {
 	RUN=$(cat "$CRASHTEST_DIR/current-$NODE_NAME" 2>/dev/null || true)
 }
 
+# vm_addrs: the VM's IPv4 addresses that libvirt knows: its DHCP leases (on a NAT network), or else
+# the host's ARP entries for it.
+vm_addrs() {
+	local a
+	a=$("${VIRSH[@]}" domifaddr "$VM" 2>/dev/null | awk '/ipv4/ { split($4, x, "/"); print x[1] }')
+	[ -n "$a" ] || a=$("${VIRSH[@]}" domifaddr "$VM" --source arp 2>/dev/null | awk '/ipv4/ { split($4, x, "/"); print x[1] }')
+	echo "$a"
+}
+
 # faults_allowed: refuse to touch a node that isn't marked as a test node (FAULTS_OK=1), or whose ssh
-# destination isn't its VM: power and link faults go to the VM through libvirt, the others (iptables,
-# a full disk, a database reset) over ssh, so both must reach the same machine. (Checked while the VM
-# has an address libvirt knows: its DHCP lease on a NAT network.)
+# destination isn't its VM, as far as can be checked: power and link faults go to the VM through
+# libvirt, the others (iptables, a full disk, a database reset) over ssh, so both must reach the same
+# machine. The VM must be running, at an address libvirt knows; ssh's address must be one of its.
 faults_allowed() {
 	[ "${FAULTS_OK:-}" = 1 ] || die "$NODE_NAME isn't marked as a test node (FAULTS_OK=1 in its env file); no faults on it"
-	local host addrs
-	addrs=$("${VIRSH[@]}" domifaddr "$VM" 2>/dev/null | awk '/ipv4/ { split($4, a, "/"); print a[1] }')
-	[ -n "$addrs" ] || return 0
+	local state host addrs
+	state=$("${VIRSH[@]}" domstate "$VM" 2>/dev/null) || die "$NODE_NAME: libvirt has no VM $VM; no faults"
+	[ "$state" = running ] || die "$NODE_NAME: the VM $VM is ${state:-in no known state}, not running; no faults"
+	addrs=$(vm_addrs)
+	[ -n "$addrs" ] || die "$NODE_NAME: libvirt knows no address of the VM $VM (no DHCP lease, no ARP entry), so it can't tell whether ssh reaches the VM; no faults"
 	host=$("${NODE_SSH[@]}" -G "$NODE" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')
 	[[ $host =~ ^[0-9.]+$ ]] || host=$(getent ahostsv4 "$host" | awk 'NR == 1 { print $1 }')
 	grep -qxF "${host:-none}" <<<"$addrs" ||
-		die "$NODE_NAME: ssh reaches $NODE at ${host:-an unknown address}, but the VM $VM is at $(paste -sd' ' <<<"$addrs"): not the same machine; no faults"
+		die "$NODE_NAME: ssh reaches $NODE at ${host:-an unknown address}, but the VM $VM is at $(paste -sd' ' <<<"$addrs"): not the same machine, or the VM's address changed (then correct HostName in the ssh config); no faults"
 }
 
 # ev TEXT...: an event, with UTC time to the millisecond, to stdout and the run's events.log.
@@ -163,4 +188,7 @@ history_start() {
 #   never had (it saw the transaction only in a block); the pool can't keep it.
 # - "Number of finalized block is missing": after a crash, the finalized block's marker can name a block
 #   whose number the database lost; the chain freezer waits for the next finalized block.
-KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point|Truncating ancient chain|Blobs unavailable, dropping reorged tx|Number of finalized block is missing'
+# - "blsync: checkpoint block is not available, reported as unknown": a beacon API endpoint behind the
+#   chain doesn't know the light client's checkpoint (seen 2026-10-11 with Nimbus's Hoodi endpoint 6 h
+#   behind); blsync starts from the other endpoints. (If none had it, the node would get no new head.)
+KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point|Truncating ancient chain|Blobs unavailable, dropping reorged tx|Number of finalized block is missing|blsync: checkpoint block is not available, reported as unknown'

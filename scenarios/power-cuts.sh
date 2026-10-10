@@ -39,6 +39,6 @@ for i in $(seq "$CUTS"); do
 done
 errors_check "$START"
 if [ "$all" = 1 ]; then
-	if last=$(node_head); then history_check "$((first - 32))" "$last"; else fail history "no head from the node"; fi
+	if last=$(node_head); then history_check "$((first - 96))" "$last"; else fail history "no head from the node"; fi
 fi
 scenario_end

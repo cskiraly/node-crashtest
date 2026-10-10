@@ -10,16 +10,16 @@
 #   provision/geth.sh NAME --geth BIN [options]
 #
 #   --geth BIN             the geth to run: linux/amd64, for Ubuntu 24.04 (glibc 2.39 at most)
-#   --network NET          hoodi (default) or sepolia; mainnet with --beacon-api or --cl. Kept on the
-#                          VM: an update follows the same network, and refuses another one
+#   --network NET          hoodi (default) or sepolia; mainnet with --beacon-api or --cl. An update
+#                          refuses another one
 #   --beacon-api URL       a beacon API endpoint for the light client (repeatable; defaults below)
-#   --cl prysm             Prysm instead of the light client
+#   --cl prysm|none        Prysm instead of the light client, or the light client (none, the default)
 #   --prysm BIN            its beacon node binary (default: the release pinned below, fetched and
 #                          checked on the VM)
 #   --checkpoint-sync URL  Prysm's checkpoint sync endpoint, also for the genesis state (defaults below)
 #   --history BLOCKS|all   the history geth keeps: about BLOCKS blocks back from the finalized block
 #                          (default 50000; needs a geth with custom history cutoffs, go-ethereum
-#                          #35792), or all of it. Kept once geth has started with it
+#                          #35792), or all of it. Chosen at the first run, then kept
 #   --restart POLICY       the units' Restart= (default always: geth stops with exit 0 when the disk is
 #                          nearly full, which on-failure doesn't restart)
 #   --geth-flags "FLAGS"   more geth flags
@@ -27,7 +27,9 @@
 #
 # Without a VM named NAME, creates one. On an existing one made by provision/vm.sh, replaces the
 # binaries and the units and restarts the services, keeping the data: the same node on another geth.
-# The node: user geth, data in /var/lib/geth, JSON-RPC on 127.0.0.1:8545 (eth, net, web3).
+# The settings are kept on the VM: an update keeps those it isn't given. The description is
+# rewritten at every run. The node: user geth, data in /var/lib/geth, JSON-RPC on 127.0.0.1:8545
+# (eth, net, web3).
 
 . "$(dirname "$0")/../lib/common.sh"
 set -eu
@@ -36,24 +38,25 @@ PRYSM_VERSION=v7.2.1
 PRYSM_SHA256=b4651effbccb242c181452ac89f176f28186b96e1548a3ed29c5d035fc9cabbc
 PRYSM_URL=https://github.com/OffchainLabs/prysm/releases/download/$PRYSM_VERSION/beacon-chain-$PRYSM_VERSION-linux-amd64
 
-usage() { sed -n '3,30p' "$0"; exit 2; }
+usage() { sed -n '3,32p' "$0"; exit 2; }
 [ $# -ge 1 ] && [[ $1 != -* ]] || usage
 NAME=$1
 shift
 GETH="" NETWORK="" APIS="" CL="" PRYSM="" CKPT_SYNC="" HISTORY=50000 RESTART=always GETH_FLAGS=""
 VMARGS=()
+declare -A GIVEN=() # the settings given, of those an update keeps
 while [ $# -gt 0 ]; do
 	[ $# -ge 2 ] || usage
 	case $1 in
 	--geth) GETH=$2 ;;
 	--network) NETWORK=$2 ;;
-	--beacon-api) APIS="$APIS $2" ;;
-	--cl) CL=$2 ;;
+	--beacon-api) APIS="$APIS $2"; GIVEN[apis]=1 ;;
+	--cl) CL=$2; GIVEN[cl]=1 ;;
 	--prysm) PRYSM=$2 ;;
-	--checkpoint-sync) CKPT_SYNC=$2 ;;
+	--checkpoint-sync) CKPT_SYNC=$2; GIVEN[ckpt]=1 ;;
 	--history) HISTORY=$2 ;;
-	--restart) RESTART=$2 ;;
-	--geth-flags) GETH_FLAGS=$2 ;;
+	--restart) RESTART=$2; GIVEN[restart]=1 ;;
+	--geth-flags) GETH_FLAGS=$2; GIVEN[flags]=1 ;;
 	--cpus | --mem | --disk) VMARGS+=("$1" "$2") ;;
 	*) usage ;;
 	esac
@@ -62,7 +65,7 @@ done
 [ -n "$GETH" ] && [ -x "$GETH" ] || die "--geth: an executable geth binary"
 [ -z "$PRYSM" ] || [ -x "$PRYSM" ] || die "--prysm: an executable"
 [[ $HISTORY =~ ^([0-9]+|all)$ ]] || die "--history: a number of blocks, or all"
-case $CL in "" | prysm) ;; *) die "--cl: prysm (or nothing, for the light client)" ;; esac
+case $CL in "" | none) CL="" ;; prysm) ;; *) die "--cl: prysm, or none (the light client)" ;; esac
 case $NETWORK in "" | hoodi | sepolia | mainnet) ;; *) die "--network: hoodi, sepolia or mainnet" ;; esac
 
 NODES=$CRASHTEST_CONFIG/nodes
@@ -78,6 +81,16 @@ if "${VIRSH[@]}" dominfo "$NAME" >/dev/null 2>&1; then
 	[ -z "$was" ] || [ -z "$NETWORK" ] || [ "$NETWORK" = "$was" ] ||
 		die "$NAME follows $was: another network needs a new node (provision/vm.sh delete $NAME)"
 	NETWORK=${NETWORK:-$was}
+	# The settings not given: as the node has them (lines "name=value").
+	kept=$(vm 'cat /etc/node-crashtest/settings 2>/dev/null' || true)
+	setting() { sed -n "s/^$1=//p" <<<"$kept" | head -n 1; }
+	[ -n "${GIVEN[cl]:-}" ] || CL=$(setting cl)
+	[ -n "${GIVEN[apis]:-}" ] || APIS=$(setting apis)
+	[ -n "${GIVEN[ckpt]:-}" ] || CKPT_SYNC=$(setting ckpt)
+	[ -n "${GIVEN[restart]:-}" ] || RESTART=$(setting restart)
+	[ -n "${GIVEN[flags]:-}" ] || GETH_FLAGS=$(setting flags)
+	RESTART=${RESTART:-always}
+	[ -z "$kept" ] || log "the node's settings: $(paste -sd';' <<<"$kept")"
 else
 	log "creating the VM $NAME"
 	"$CRASHTEST/provision/vm.sh" create "$NAME" "${VMARGS[@]}" >/dev/null
@@ -87,6 +100,7 @@ vm 'for c in jq curl iptables; do command -v $c >/dev/null || exit 1; done' ||
 		apt-get -qq -o DPkg::Lock::Timeout=600 install -y jq curl iptables >/dev/null' ||
 	die "could not install packages on $NAME"
 
+SET_APIS=${APIS# } SET_CKPT=$CKPT_SYNC # as given, or kept; empty for the defaults
 NETWORK=${NETWORK:-hoodi}
 case $NETWORK in
 hoodi)
@@ -115,12 +129,14 @@ vm "systemctl stop geth prysm 2>/dev/null
 	install -d -o geth -g geth -m 700 /var/lib/geth
 	install -d -m 755 /etc/node-crashtest
 	echo $NETWORK > /etc/node-crashtest/network"
+# The settings, as given (empty: the defaults), for the next update.
+printf 'cl=%s\napis=%s\nckpt=%s\nrestart=%s\nflags=%s\n' "$CL" "$SET_APIS" "$SET_CKPT" "$RESTART" "$GETH_FLAGS" |
+	vm 'cat > /etc/node-crashtest/settings'
 
-# The history cutoff: chosen once, and kept once geth has started with it (geth refuses a database
-# whose tail doesn't match --history.chain).
-cutoff=$(vm 'cat /etc/node-crashtest/history-chain 2>/dev/null' || true) pin=0
+# The history cutoff: chosen at the first run, and kept from then on (geth refuses a database whose
+# tail doesn't match --history.chain; a cutoff further back than the history asked for is harmless).
+cutoff=$(vm 'cat /etc/node-crashtest/history-chain 2>/dev/null' || true)
 if [ -z "$cutoff" ]; then
-	pin=1
 	if [ "$HISTORY" = all ]; then
 		cutoff=all
 	else
@@ -131,6 +147,7 @@ if [ -z "$cutoff" ]; then
 		[[ $hash =~ ^0x[0-9a-f]{64}$ ]] || die "no block $n from the reference ($REF)"
 		cutoff=$n:$hash
 	fi
+	vm "echo '$cutoff' > /etc/node-crashtest/history-chain"
 	log "history: $cutoff"
 fi
 [ "$cutoff" = all ] && HISTORY_START=0 || HISTORY_START=${cutoff%%:*}
@@ -215,8 +232,8 @@ fi
 
 # --- the node's description ---------------------------------------------------------------------
 cat > "$NODES/$NAME.env" <<EOF
-# Written by node-crashtest's provision/geth.sh on $(date -u +%FT%TZ): geth ${GETH_VERSION:-?}
-# ($(sha256sum "$GETH" | cut -c1-12)), ${CL:-the light client}, history from $HISTORY_START.
+# Written by node-crashtest's provision/geth.sh on $(date -u +%FT%TZ), and rewritten by its next run:
+# geth ${GETH_VERSION:-?} ($(sha256sum "$GETH" | cut -c1-12)), ${CL:-the light client}, history from $HISTORY_START.
 NODE=$NAME
 SSH_CONFIG=$(printf %q "$SSHCFG")
 VM=$NAME
@@ -231,5 +248,4 @@ FAULTS_OK=1
 EOF
 up() { [ -n "$(vm "curl -s -m 5 -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_blockNumber\",\"params\":[]}' http://127.0.0.1:8545" 2>/dev/null)" ]; }
 wait_until 300 "geth's RPC on $NAME" up || die "geth doesn't answer on $NAME: see journalctl -u geth there"
-[ "$pin" = 0 ] || vm "echo '$cutoff' > /etc/node-crashtest/history-chain"
 log "$NAME: geth ${GETH_VERSION:-?} running (${CL:-light client}); node description $NODES/$NAME.env"
