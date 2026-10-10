@@ -156,4 +156,9 @@ history_start() {
 # - "Log index initialization failed ... cannot start indexing before history cutoff point": a geth
 #   without go-ethereum#35875 builds no log index on a node whose history starts at a custom cutoff
 #   (provision/geth.sh's default); eth_getLogs still answers, unindexed (checks/logs.sh compares it).
-KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point'
+# - "Truncating ancient chain": after a crash during a snap sync, the freezer can hold blocks beyond the
+#   last snap-sync block the key-value store recorded; geth truncates them at startup (by design) and
+#   downloads them again.
+# - "Blobs unavailable, dropping reorged tx": a reorg put back a blob transaction whose blobs the node
+#   never had (it saw the transaction only in a block); the pool can't keep it.
+KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point|Truncating ancient chain|Blobs unavailable, dropping reorged tx'

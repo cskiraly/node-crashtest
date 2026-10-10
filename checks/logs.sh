@@ -7,13 +7,15 @@
 #  - eth_getLogs for the deposit contract and the window's three busiest addresses, node against the
 #    reference (which may refuse queries without an address).
 # A log is compared as (block, log index, tx hash, address, topics, data); a side is "<count> <digest>".
-# No whole-window queries against public endpoints.
+# No whole-window queries against public endpoints. A node without a log index (geth logs "reverting
+# to unindexed mode") answers a whole window by reading every receipt: hundreds of MB, minutes; each
+# query on the node gets 15 min.
 #
 #   checks/logs.sh NODE [WINDOWS]   (default 6)
 
 . "$(dirname "$0")/../lib/common.sh"
 set -u
-[ $# -ge 1 ] || { sed -n '3,12p' "$0"; exit 2; }
+[ $# -ge 1 ] || { sed -n '3,14p' "$0"; exit 2; }
 load_node "$1"
 N=${2:-6}
 DEPOSIT=0x00000000219ab540356cbb839cbe05303d7705fa
@@ -31,7 +33,7 @@ digest() {
 # On the node, for FROM..TO: "index <count> <digest>", "receipts <count> <digest>", and
 # "addr <address> <count> <digest>" for the deposit contract and the window's three busiest addresses.
 NODE_SCRIPT=$(cat <<'NODE_END'
-r() { curl -s -m 120 -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" "$RPC"; }
+r() { curl -s -m 900 -H 'Content-Type: application/json' -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" "$RPC"; }
 LINE='[.blockNumber, .logIndex, .transactionHash, (.address | ascii_downcase), (.topics | join(",")), .data] | join("|")'
 range="\"fromBlock\":\"$(printf 0x%x $FROM)\",\"toBlock\":\"$(printf 0x%x $TO)\""
 all=$(r eth_getLogs "[{$range}]" | jq -r ".result[] | $LINE")
