@@ -1,32 +1,26 @@
 # Scenarios
 
-OK/FAIL scenarios built from the faults, the watcher and the checks. Each one starts a watcher of
-its own and ends with the same questions: did the node come back without a person, how long until it
-followed the chain again, is its log free of unexpected errors, is its history intact.
-
     scenarios/NAME.sh NODE [OPTIONS]
 
-A scenario prints one line per check (`OK`, `FAIL`, or `INFO` for what is measured but not judged)
-and exits 0 when every check passed, 1 when one failed, 2 when it couldn't run (the node wasn't at the
-chain's head, say). Its output, the watcher's status lines, the node's journal and the events go to a
-run directory, `~/.cache/node-crashtest/runs/NODE-SCENARIO-TIME/`.
+Each scenario runs a watcher of its own and applies its faults; after each one it asks: is the node
+running again by itself (its RPC answering), does it get a new head, how soon is it at the reference's
+head. At the end: no unexpected error in its log, and its history intact. It prints OK, FAIL and INFO
+lines, exits 0, 1 (a check failed) or 2 (it couldn't run), and keeps its logs in
+`~/.cache/node-crashtest/runs/`.
 
-| Scenario | Faults | Passes when | Time |
-|---|---|---|---|
-| `sync-cuts.sh [--reset] [--off S] [--timeout H]` | a power cut at each phase of geth's sync, as the phase's first line appears: state download, chain download, state healing, the end of snap sync, log index rendering, the first block at the head (`--reset`: from an empty database) | the node runs again after every cut, finishes its sync and follows the chain; no unexpected error; history and log index intact | the sync, plus ~1 h of checks |
-| `power-cuts.sh [--cuts N] [--off S] [--gap S]` | power cuts at the head (default 3) | a new head within 15 min, at the reference's head within an hour, after each; no unexpected error; history intact. Shows how far back each cut set the node | ~15 min |
-| `net-cuts.sh [--link S] [--endpoints S] [--devp2p S] [--new-head S]` | the link down (default 30 min); the node's HTTP(S) out cut (its beacon API endpoints; 15 min); its peer-to-peer traffic cut (5 min) | a new head within `--new-head` (default 5 min) after each, at the reference's head within 30 min; no unexpected error; history intact. Shows how far behind it fell meanwhile | ~1 h |
-| `disk-full.sh [--for S]` | the root file system full (default 2 min) | the node runs again by itself, a new head within 15 min, at the head within an hour; no unexpected error outside the fault; history intact | ~10 min |
-| `write-cut.sh [--file F] [--rounds N] [--keep-auto] [--wait S]` | a power cut right after the node rewrites a file (default: `WATCH_FILE`, a light client's checkpoint), ext4's `auto_da_alloc` off; the file must change within `--wait` (default 30 min) | a new head within 15 min, at the head within an hour, after each (from the boot); no unexpected error; history intact | ~10 min per round |
+| Scenario | Faults | Time |
+|---|---|---|
+| `sync-cuts.sh [--reset]` | a power cut at the start of each phase of geth's sync (state download, chain download, healing, the end of snap sync, log index, the head); then the history and the log index | the sync, plus ~1 h |
+| `power-cuts.sh [--cuts N]` | power cuts at the head; shows how far back each one set the node | ~15 min |
+| `net-cuts.sh [--link S] [--endpoints S] [--devp2p S]` | the link down 30 min, then only the beacon API endpoints 15 min, then only the peers 5 min | ~1 h |
+| `disk-full.sh [--for S]` | the disk full for 2 min | ~10 min |
+| `write-cut.sh [--file F]` | a power cut right after the node rewrites a file (a light client's checkpoint), with ext4's `auto_da_alloc` off | ~10 min |
 
-Each limit counts from the end of the fault. "Running" means the service is active and the node's RPC
-answers: a node in a crash loop is active for a moment at every start. "No unexpected error": no
-ERROR, CRIT, `Fatal:` or panic line in the node's log but the known, harmless ones (`KNOWN_ERRORS` in
-`lib/common.sh`, each with its reason). The scenarios that judge the node's log, and `sync-cuts.sh`'s
-phases, read geth's log lines; the faults and the other checks work for any client.
+A script run without arguments shows all its options. Limits count from the end of the fault: a new
+head within 15 min (5 for `net-cuts`), the reference's head within an hour (30 min for `net-cuts`). The
+error lines geth logs in normal operation or after a crash are in `lib/common.sh` (`KNOWN_ERRORS`),
+each with its reason. `sync-cuts` and the error check read geth's log lines; the rest works for any
+client.
 
-## Writing one
-
-`lib.sh` has the pieces: `scenario_start` (a watcher in a run directory of its own), `require_head`,
-`after_fault` (running again, a new head, caught up, with the times), `errors_check`, `history_check`,
-`logs_check` and `scenario_end`.
+`lib.sh` has the pieces for a new one: `scenario_start`, `require_head`, `after_fault`,
+`errors_check`, `history_check`, `logs_check`, `scenario_end`.
