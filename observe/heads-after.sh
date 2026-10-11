@@ -20,9 +20,12 @@ first_head() {
 		if (match($0, /number=[0-9,]+/)) { n = substr($0, RSTART + 7, RLENGTH - 7); gsub(",", "", n)
 			if (n + 0 > h) { print; exit } } }' "$RUN/node.log"
 }
+# caught_up: the watcher's last line, from SINCE on, has the node's head within a block of a known
+# reference head.
 caught_up() {
-	tail -n 1 "$RUN/watch.log" | awk '{ for (i = 1; i <= NF; i++) { if ($i ~ /^head=/) h = substr($i, 6); if ($i ~ /^ref=/) r = substr($i, 5) } }
-		END { exit !(h + 0 > 0 && h + 1 >= r + 0) }'
+	tail -n 1 "$RUN/watch.log" | awk -v s="$SINCE" '{ t = substr($1, 1, 19)
+		for (i = 1; i <= NF; i++) { if ($i ~ /^head=[0-9]+$/) h = substr($i, 6); if ($i ~ /^ref=[0-9]+$/) r = substr($i, 5) } }
+		END { exit !(t >= s && h != "" && r + 0 > 0 && h + 1 >= r + 0) }'
 }
 
 log "waiting for a head above $HEAD after $SINCE"

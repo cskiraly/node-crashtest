@@ -1,6 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-3.0-or-later
-# A full disk at the chain's head: the node's root file system full for SECONDS, then freed. Then:
+# A full disk at the chain's head: the file system holding the node's data full for SECONDS, then
+# freed (faults/disk-full.sh). Then:
 # is the service running again by itself, does the node get a head above the one before, how soon is
 # it at the reference's head again. Errors from the full disk until the node is back at the head are
 # expected; others aren't. Then its history from before the fault.
@@ -25,6 +26,7 @@ while [ $# -ge 2 ]; do
 	shift 2
 done
 [ $# = 0 ] || { sed -n '3,13p' "$0"; exit 2; }
+number --for "$FOR"
 scenario_start disk-full "$node"
 require_head 1800
 

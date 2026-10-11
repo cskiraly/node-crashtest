@@ -31,6 +31,7 @@ while [ $# -ge 1 ]; do
 	*) sed -n '3,18p' "$0"; exit 2 ;;
 	esac
 done
+number --rounds "$ROUNDS"; number --wait "$WAIT"
 scenario_start write-cut "$node"
 FILE=${FILE:-$WATCH_FILE}
 [ -n "$FILE" ] || not_run "no file to watch: give --file, or set WATCH_FILE in the node's description"

@@ -82,8 +82,11 @@ EOF
 		--os-variant ubuntu24.04 --network network=default --cloud-init "user-data=$ud" \
 		--noautoconsole --graphics none >/dev/null; then
 		rm -f "$ud"
-		"${VIRSH[@]}" vol-delete "$name.qcow2" --pool default >/dev/null 2>&1
-		die "virt-install failed; $name's disk deleted"
+		# A domain it left (there was none of this name before): gone too, then the disk made here.
+		"${VIRSH[@]}" destroy "$name" >/dev/null 2>&1 || true
+		"${VIRSH[@]}" undefine "$name" >/dev/null 2>&1 || true
+		"${VIRSH[@]}" vol-delete "$name.qcow2" --pool default >/dev/null 2>&1 || true
+		die "virt-install failed; $name and its disk deleted"
 	fi
 	rm -f "$ud"
 	for _ in $(seq 60); do ip=$(vm_ip "$name"); [ -n "$ip" ] && break; sleep 5; done
@@ -109,11 +112,16 @@ EOF
 }
 
 delete() {
-	local name=$1
+	local name=$1 own others
 	"${VIRSH[@]}" dominfo "$name" >/dev/null 2>&1 || die "no VM named $name"
 	ours "$name" || die "$name wasn't made by provision/vm.sh; not deleting it"
+	# Only the disk create made; a volume attached since stays.
+	own=$("${VIRSH[@]}" vol-path "$name.qcow2" --pool default 2>/dev/null || true)
+	others=$("${VIRSH[@]}" domblklist "$name" --details | awk -v own="$own" 'NR > 2 && $2 == "disk" && $4 != "-" && $4 != own { print $4 }')
 	"${VIRSH[@]}" destroy "$name" >/dev/null 2>&1 || true
-	"${VIRSH[@]}" undefine "$name" --remove-all-storage >/dev/null || die "could not delete $name"
+	"${VIRSH[@]}" undefine "$name" >/dev/null || die "could not delete $name"
+	[ -z "$own" ] || "${VIRSH[@]}" vol-delete "$name.qcow2" --pool default >/dev/null || die "could not delete $name's disk $own"
+	[ -z "$others" ] || log "kept the other disks $name had: $(paste -sd' ' <<<"$others")"
 	rm -f "$NODES/$name.ssh" "$NODES/$name.known_hosts" "$CRASHTEST_DIR/current-$name"
 	# Its description too, if it describes this VM.
 	! grep -qx "VM=$name" "$NODES/$name.env" 2>/dev/null || rm -f "$NODES/$name.env"

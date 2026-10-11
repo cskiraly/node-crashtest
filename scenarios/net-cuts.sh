@@ -32,6 +32,8 @@ while [ $# -ge 2 ]; do
 	shift 2
 done
 [ $# = 0 ] || { sed -n '3,18p' "$0"; exit 2; }
+number --link "$LINK" 0; number --endpoints "$ENDPOINTS" 0; number --devp2p "$DEVP2P" 0; number --new-head "$NEW_HEAD"
+[ $((LINK + ENDPOINTS + DEVP2P)) -gt 0 ] || not_run "no outage: --link, --endpoints and --devp2p are all 0"
 scenario_start net-cuts "$node"
 require_head 1800
 

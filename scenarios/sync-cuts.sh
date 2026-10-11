@@ -29,6 +29,7 @@ while [ $# -gt 0 ]; do
 	*) sed -n '3,19p' "$0"; exit 2 ;;
 	esac
 done
+number --off "$OFF" 0; number --timeout "$HOURS"
 scenario_start sync-cuts "$node"
 DEADLINE=$(( $(date +%s) + HOURS * 3600 ))
 

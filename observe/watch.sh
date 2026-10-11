@@ -63,11 +63,13 @@ log "watching $NODE_NAME ($NODE, $VM, $MAC) into $RUN; pid $$ (journal $JPID)"
 
 i=0 ref=""
 while :; do
-	now=$(date -u +%FT%TZ)
+	# Without its journal stream, the watcher stops: its copy of the log would end unnoticed.
+	kill -0 "$JPID" 2>/dev/null || { log "the journal stream's worker died; the watcher stops"; exit 1; }
 	vm=$("${VIRSH[@]}" domstate "$VM" 2>/dev/null | head -1 | tr ' ' _)
 	link=$("${VIRSH[@]}" domif-getlink "$VM" "$MAC" 2>/dev/null | awk '{ print $NF }')
 	[ $((i % 3)) = 0 ] && ref=$(rpc "$REF" eth_blockNumber 2>/dev/null | jq -r "$NUM" 2>/dev/null)
 	out=$(timeout 20 "${SSH[@]}" bash -s <<<"$PROBE" 2>/dev/null)
+	now=$(date -u +%FT%TZ) # after the probe: what a line shows, the node had by then
 	if [ -n "$out" ]; then
 		state=$(sed -n 1p <<<"$out")
 		sync=$(sed -n 2p <<<"$out" | jq -r "$SYNC" 2>/dev/null)

@@ -59,7 +59,7 @@ start=$(history_start)
 [[ $start =~ ^[0-9]+$ ]] || die "the node's first block is unknown: set HISTORY_START or HISTORY_START_CMD in its env file"
 head=$(node_rpc eth_blockNumber | jq -r '.result // empty' 2>/dev/null) || true
 [[ $head =~ ^0x[0-9a-f]+$ ]] || die "no head from the node"
-fin=$(ref_rpc eth_getBlockByNumber '["finalized",false]' | jq -r '.result.number // empty' 2>/dev/null) || true
+fin=$(ref_rpc eth_getBlockByNumber '["finalized",false]' '.result.number | type == "string"' | jq -r .result.number 2>/dev/null) || true
 [[ $fin =~ ^0x[0-9a-f]+$ ]] || die "no finalized block from the reference ($REF)"
 top=$(( head < fin ? head : fin ))
 [ "$top" -gt $((start + SPAN)) ] || die "the node's history $start-$top is shorter than a window"
@@ -83,7 +83,7 @@ for i in $(seq 0 $((N - 1))); do
 	while read -r _ a cnt dg; do
 		n=$((n + 1))
 		[ "$cnt" != error ] || { fail "addr-$i-${a:0:8}" "blocks $from-$to, $a: no answer on the node"; continue; }
-		if ! ref=$(ref_rpc eth_getLogs "[{\"fromBlock\":\"$(printf 0x%x $from)\",\"toBlock\":\"$(printf 0x%x $to)\",\"address\":\"$a\"}]"); then
+		if ! ref=$(ref_rpc eth_getLogs "[{\"fromBlock\":\"$(printf 0x%x $from)\",\"toBlock\":\"$(printf 0x%x $to)\",\"address\":\"$a\"}]" '.result | type == "array"'); then
 			info "ref-$i-${a:0:8}" "blocks $from-$to, $a: the reference didn't answer"
 			continue
 		fi

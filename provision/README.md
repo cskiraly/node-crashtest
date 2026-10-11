@@ -4,9 +4,9 @@ A provisioner puts a node on a VM and describes it in an env file,
 `~/.config/node-crashtest/nodes/NAME.env` (see `lib/node.env.example`): the VM, the ssh destination,
 the network, the systemd service and its user, the data directory, the RPC address, and `FAULTS_OK=1`,
 without which nothing cuts the node. The VM is in libvirt (`qemu:///system`), reachable over ssh with
-sudo without a password, and has `curl`, `jq`, `iptables` and `fallocate`. Faults check that ssh
-reaches the VM: its address must be one libvirt knows for it (a DHCP lease, or an ARP entry), and
-they refuse a VM that isn't running.
+sudo without a password, and has `curl`, `jq`, `iptables` and `fallocate`. Faults, and `geth.sh`
+before it changes a VM, check that ssh reaches that VM: the machine at the other end must have the
+VM's UUID (its firmware's, which libvirt sets), and the VM must be running.
 
 A project that deploys nodes its own way brings its own provisioner, so that the faults hit the node
 as that project runs it.

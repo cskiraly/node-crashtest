@@ -70,12 +70,29 @@ case $NETWORK in "" | hoodi | sepolia | mainnet) ;; *) die "--network: hoodi, se
 
 NODES=$CRASHTEST_CONFIG/nodes
 SSHCFG=$NODES/$NAME.ssh
-vm() { ssh -F "$SSHCFG" -o BatchMode=yes "$NAME" "$@"; }
+# vm COMMAND: COMMAND on the VM, as root. Once same_vm has checked it (VM_UUID), only on a machine with
+# its UUID, checked in the same ssh session (exit 99 otherwise).
+VM_UUID=""
+vm() {
+	ssh -F "$SSHCFG" -o BatchMode=yes "$NAME" \
+		${VM_UUID:+"[ \"\$($MACHINE_UUID | tr A-F a-f)\" = '$VM_UUID' ] || { echo 'not the VM $NAME' >&2; exit 99; };"} "$@"
+}
+# same_vm: the machine NAME's ssh config reaches is the VM NAME (its UUID), checked before any change.
+same_vm() {
+	local got want
+	want=$(uuid_of "$NAME")
+	got=$(vm "$MACHINE_UUID" 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]') || true
+	[ -n "$got" ] && [ "$got" = "$want" ] ||
+		die "$SSHCFG reaches a machine with UUID ${got:-unknown}, not the VM $NAME ($want); nothing changed"
+	VM_UUID=$want
+}
 
 # --- the VM -----------------------------------------------------------------------------------
 if "${VIRSH[@]}" dominfo "$NAME" >/dev/null 2>&1; then
 	[ "$("${VIRSH[@]}" desc "$NAME")" = "node-crashtest VM" ] && [ -f "$SSHCFG" ] ||
 		die "$NAME exists but wasn't made by provision/vm.sh"
+	[ "$("${VIRSH[@]}" domstate "$NAME" 2>/dev/null)" = running ] || die "$NAME isn't running (virsh -c qemu:///system start $NAME)"
+	same_vm
 	log "updating the node on $NAME"
 	was=$(vm 'cat /etc/node-crashtest/network 2>/dev/null' || true)
 	[ -z "$was" ] || [ -z "$NETWORK" ] || [ "$NETWORK" = "$was" ] ||
@@ -94,6 +111,7 @@ if "${VIRSH[@]}" dominfo "$NAME" >/dev/null 2>&1; then
 else
 	log "creating the VM $NAME"
 	"$CRASHTEST/provision/vm.sh" create "$NAME" "${VMARGS[@]}" >/dev/null
+	same_vm
 fi
 vm 'for c in jq curl iptables; do command -v $c >/dev/null || exit 1; done' ||
 	vm 'export DEBIAN_FRONTEND=noninteractive; apt-get -qq -o DPkg::Lock::Timeout=600 update &&
@@ -116,22 +134,20 @@ CKPT_SYNC=${CKPT_SYNC:-$DEFAULT_CKPT}
 [ -n "$CL" ] || [ -n "$APIS" ] || die "the light client needs --beacon-api on $NETWORK"
 REF=$(reference_rpc "$NETWORK")
 
-# --- geth ---------------------------------------------------------------------------------------
-# The new binary is checked before the node (if there is one) is stopped.
+# --- geth, and what the node needs ------------------------------------------------------------
+# Staged while the node (if there is one) still runs, as *.new files: whatever can fail comes before
+# the stop (the binaries, the history cutoff, the light client's checkpoint, Prysm's download, the
+# units); after it, only renames.
+vm 'rm -f /usr/local/bin/beacon-chain.new /etc/systemd/system/geth.service.new /etc/systemd/system/prysm.service.new \
+	/etc/node-crashtest/settings.new /etc/node-crashtest/network.new'
 log "installing geth ($(sha256sum "$GETH" | cut -c1-12))"
 vm 'cat > /usr/local/bin/geth.new && chmod 755 /usr/local/bin/geth.new' < "$GETH"
 GETH_VERSION=$(vm '/usr/local/bin/geth.new version' | awk -F': ' '/^Version|^Git Commit:/ { printf "%s ", $2 }') ||
 	die "this geth doesn't run on $NAME (Ubuntu 24.04: is it linux/amd64, for glibc 2.39 at most?)"
 GETH_VERSION=${GETH_VERSION% }
-vm "systemctl stop geth prysm 2>/dev/null
-	mv -f /usr/local/bin/geth.new /usr/local/bin/geth
-	id geth >/dev/null 2>&1 || useradd --system --home-dir /var/lib/geth --shell /usr/sbin/nologin geth
+vm 'id geth >/dev/null 2>&1 || useradd --system --home-dir /var/lib/geth --shell /usr/sbin/nologin geth
 	install -d -o geth -g geth -m 700 /var/lib/geth
-	install -d -m 755 /etc/node-crashtest
-	echo $NETWORK > /etc/node-crashtest/network"
-# The settings, as given (empty: the defaults), for the next update.
-printf 'cl=%s\napis=%s\nckpt=%s\nrestart=%s\nflags=%s\n' "$CL" "$SET_APIS" "$SET_CKPT" "$RESTART" "$GETH_FLAGS" |
-	vm 'cat > /etc/node-crashtest/settings'
+	install -d -m 755 /etc/node-crashtest'
 
 # The history cutoff: chosen at the first run, and kept from then on (geth refuses a database whose
 # tail doesn't match --history.chain; a cutoff further back than the history asked for is harmless).
@@ -179,6 +195,25 @@ else
 fi
 flags="$flags $GETH_FLAGS"
 
+if [ "$CL" = prysm ]; then
+	if [ -n "$PRYSM" ]; then
+		log "installing Prysm ($(sha256sum "$PRYSM" | cut -c1-12))"
+		vm 'cat > /usr/local/bin/beacon-chain.new && chmod 755 /usr/local/bin/beacon-chain.new' < "$PRYSM"
+	else
+		log "installing Prysm $PRYSM_VERSION"
+		vm "set -e; d=\$(mktemp -d); curl -sSfL -o \$d/beacon-chain '$PRYSM_URL'
+			echo '$PRYSM_SHA256  '\$d/beacon-chain | sha256sum -c --quiet
+			install -m 755 \$d/beacon-chain /usr/local/bin/beacon-chain.new; rm -rf \$d" || die "could not install Prysm"
+	fi
+	vm 'set -e
+		getent group jwt >/dev/null || groupadd --system jwt
+		id prysm >/dev/null 2>&1 || useradd --system --home-dir /var/lib/prysm --shell /usr/sbin/nologin prysm
+		usermod -aG jwt geth; usermod -aG jwt prysm
+		install -d -o prysm -g prysm -m 700 /var/lib/prysm
+		[ -s /etc/node-crashtest/jwt.hex ] || openssl rand -hex 32 > /etc/node-crashtest/jwt.hex
+		chown root:jwt /etc/node-crashtest/jwt.hex; chmod 640 /etc/node-crashtest/jwt.hex'
+fi
+
 unit() { # NAME DESCRIPTION USER EXEC
 	cat <<EOF
 [Unit]
@@ -201,34 +236,32 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
 }
-unit geth geth geth "/usr/local/bin/geth $flags" | vm 'cat > /etc/systemd/system/geth.service'
-
-# --- Prysm -------------------------------------------------------------------------------------
+unit geth geth geth "/usr/local/bin/geth $flags" | vm 'cat > /etc/systemd/system/geth.service.new'
 if [ "$CL" = prysm ]; then
-	if [ -n "$PRYSM" ]; then
-		log "installing Prysm ($(sha256sum "$PRYSM" | cut -c1-12))"
-		vm 'cat > /usr/local/bin/beacon-chain && chmod 755 /usr/local/bin/beacon-chain' < "$PRYSM"
-	else
-		log "installing Prysm $PRYSM_VERSION"
-		vm "set -e; d=\$(mktemp -d); curl -sSfL -o \$d/beacon-chain '$PRYSM_URL'
-			echo '$PRYSM_SHA256  '\$d/beacon-chain | sha256sum -c --quiet
-			install -m 755 \$d/beacon-chain /usr/local/bin/beacon-chain; rm -rf \$d" || die "could not install Prysm"
-	fi
-	vm 'set -e
-		getent group jwt >/dev/null || groupadd --system jwt
-		id prysm >/dev/null 2>&1 || useradd --system --home-dir /var/lib/prysm --shell /usr/sbin/nologin prysm
-		usermod -aG jwt geth; usermod -aG jwt prysm
-		install -d -o prysm -g prysm -m 700 /var/lib/prysm
-		[ -s /etc/node-crashtest/jwt.hex ] || openssl rand -hex 32 > /etc/node-crashtest/jwt.hex
-		chown root:jwt /etc/node-crashtest/jwt.hex; chmod 640 /etc/node-crashtest/jwt.hex'
 	# Its HTTP API (3500) and gRPC (4000) listen on 127.0.0.1 by default.
 	unit prysm Prysm prysm "/usr/local/bin/beacon-chain --$NETWORK --datadir /var/lib/prysm --accept-terms-of-use \
 --execution-endpoint http://127.0.0.1:8551 --jwt-secret /etc/node-crashtest/jwt.hex \
---checkpoint-sync-url $CKPT_SYNC --genesis-beacon-api-url $CKPT_SYNC" | vm 'cat > /etc/systemd/system/prysm.service'
+--checkpoint-sync-url $CKPT_SYNC --genesis-beacon-api-url $CKPT_SYNC" | vm 'cat > /etc/systemd/system/prysm.service.new'
+fi
+# The network and the settings as given (empty: the defaults), for the next update.
+echo "$NETWORK" | vm 'cat > /etc/node-crashtest/network.new'
+printf 'cl=%s\napis=%s\nckpt=%s\nrestart=%s\nflags=%s\n' "$CL" "$SET_APIS" "$SET_CKPT" "$RESTART" "$GETH_FLAGS" |
+	vm 'cat > /etc/node-crashtest/settings.new'
+
+# --- the switch: the node stopped, the staged files renamed into place, started -------------------
+# From the stop on, a failure starts the services again.
+trap 'vm "systemctl daemon-reload; systemctl start geth; ! systemctl is-enabled -q prysm 2>/dev/null || systemctl start prysm" >/dev/null 2>&1 || true' EXIT
+vm 'systemctl stop geth prysm 2>/dev/null
+	for f in /usr/local/bin/geth /usr/local/bin/beacon-chain /etc/systemd/system/geth.service \
+		/etc/systemd/system/prysm.service /etc/node-crashtest/network /etc/node-crashtest/settings; do
+		[ ! -e $f.new ] || mv -f $f.new $f || exit 1
+	done'
+if [ "$CL" = prysm ]; then
 	vm 'systemctl daemon-reload && systemctl enable -q geth prysm && systemctl restart geth prysm'
 else
 	vm 'systemctl disable -q --now prysm 2>/dev/null; systemctl daemon-reload && systemctl enable -q geth && systemctl restart geth'
 fi
+trap - EXIT
 
 # --- the node's description ---------------------------------------------------------------------
 cat > "$NODES/$NAME.env" <<EOF

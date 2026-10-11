@@ -9,6 +9,9 @@
 set -u
 
 not_run() { printf 'NOT RUN: %s\n' "$*"; exit 2; }
+# number OPTION VALUE [MIN]: VALUE is a whole number of at least MIN (default 1), or the scenario doesn't
+# run.
+number() { [[ $2 =~ ^[0-9]+$ ]] && [ "$2" -ge "${3:-1}" ] || not_run "$1: a whole number of at least ${3:-1}, not '$2'"; }
 
 # scenario_start NAME NODE: load the node (it must allow faults), start a watcher in a run directory
 # of its own (RUN), and stop it when the scenario exits.
@@ -121,13 +124,19 @@ after_fault() {
 
 # errors_check FROM [START END]...: ERROR, CRIT, Fatal and panic lines in the node's log from FROM
 # (UTC) on, but the known harmless ones (KNOWN_ERRORS) and those between a START and END given (a full
-# disk makes errors); each distinct message once (times, ids and counters stripped).
+# disk makes errors); each distinct message once (times, ids and counters stripped). The log: the
+# node's journal, read again now (whatever the watcher's stream missed), and the watcher's copy (which
+# has the lines a power cut took from the node's disk).
 errors_check() {
 	local from=$1 out
 	shift
-	# No log line since FROM is no evidence: the watcher's journal stream failed.
-	awk -v s="$from" 'substr($1, 1, 19) >= s { found = 1; exit } END { exit !found }' "$RUN/node.log" 2>/dev/null ||
-		{ fail errors "no line of the node's log from $from on, in $RUN/node.log"; return; }
+	# A watcher that stopped has an incomplete copy (its journal stream ended with it).
+	[ -z "${WATCHER:-}" ] || kill -0 "$WATCHER" 2>/dev/null ||
+		{ fail errors "the watcher stopped during the scenario (see $RUN/watcher.out): its copy of the log is incomplete"; return; }
+	on "sudo -n journalctl -u '$SERVICE' -o short-iso-precise --utc --no-hostname --since '${from/T/ } UTC'" \
+		> "$RUN/node-journal.log" 2>/dev/null || { fail errors "could not read the node's journal"; return; }
+	awk -v s="$from" 'substr($1, 1, 19) >= s { found = 1; exit } END { exit !found }' "$RUN/node-journal.log" ||
+		{ fail errors "no line in the node's journal from $from on"; return; }
 	out=$(KNOWN="$KNOWN_ERRORS" WINDOWS="$*" awk -v s="$from" '
 		BEGIN { n = split(ENVIRON["WINDOWS"], w, " ") }
 		{ t = substr($1, 1, 19); if (t < s) next
@@ -135,8 +144,8 @@ errors_check() {
 		{ r = $0; sub(/^[^ ]+ [^ ]+: /, "", r) } # the message, after the time and "geth[PID]: "
 		r ~ /^(ERROR|CRIT) *\[|^Fatal:|^panic:|^fatal error:/ && $0 !~ ENVIRON["KNOWN"] {
 			k = $0; sub(/^[^ ]+ [^ ]+\[[0-9]+\]: /, "", k); sub(/^[A-Z]+ *\[[^]]*\] */, "", k)
-			gsub(/=[^ ]+/, "=", k); if (!(k in seen)) { seen[k] = 1; print substr($0, 1, 220) } }' "$RUN/node.log") ||
-		{ fail errors "could not read $RUN/node.log"; return; }
+			gsub(/=[^ ]+/, "=", k); if (!(k in seen)) { seen[k] = 1; print substr($0, 1, 220) } }' \
+		"$RUN/node-journal.log" "$RUN/node.log") || { fail errors "could not read the watcher's copy, $RUN/node.log"; return; }
 	if [ -z "$out" ]; then
 		ok errors "no unexpected ERROR, CRIT, Fatal or panic in the node's log"
 	else

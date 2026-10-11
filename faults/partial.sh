@@ -32,8 +32,9 @@ devp2p)
 esac
 
 # The commands for the node: set up the chains in both families (stopping at the first failure), and
-# take them down (whatever there is of them; it fails unless they're gone). -w: wait for the xtables
-# lock, which another firewall update may hold.
+# take them down (whatever there is of them; it fails unless a listing of all the rules, itself
+# successful, shows none of them). -w: wait for the xtables lock, which another firewall update may
+# hold.
 up="set -e;" down="" gone=""
 for t in iptables ip6tables; do
 	T="$t -w 10"
@@ -43,8 +44,8 @@ for t in iptables ip6tables; do
 	up="$up $T -I OUTPUT 1 -j crashtest-out; $T -I INPUT 1 -j crashtest-in;"
 	for c in out:OUTPUT in:INPUT; do
 		down="$down while $T -D ${c#*:} -j crashtest-${c%:*} 2>/dev/null; do :; done; $T -F crashtest-${c%:*} 2>/dev/null; $T -X crashtest-${c%:*} 2>/dev/null;"
-		gone="$gone ! $T -n -L crashtest-${c%:*} >/dev/null 2>&1 &&"
 	done
+	gone="$gone ! { $T -S || echo crashtest-unlisted; } | grep -q crashtest- &&" # no $: systemd-run may expand it
 done
 down="$down $gone true"
 
@@ -52,7 +53,9 @@ unit=crashtest-uncut-$$
 # restore: the rules taken down; then, only once they're gone, the VM's own cleanup cancelled.
 restore() { on "sudo -n sh -c '$down'" && on "sudo -n systemctl stop $unit.timer 2>/dev/null; true"; }
 on "sudo -n sh -c '$down'" || die "could not remove an earlier cut's rules"
-on "sudo -n systemd-run -q --unit=$unit --on-active=$((FOR + 60)) /bin/sh -c '$down'" || die "could not arm the cleanup"
+# The VM's own cleanup, should this script not get to it: tried for a minute.
+on "sudo -n systemd-run -q --unit=$unit --on-active=$((FOR + 60)) /bin/sh -c 'for i in 1 2 3 4 5 6; do $down && exit 0; sleep 10; done; exit 1'" ||
+	die "could not arm the cleanup"
 if ! on "sudo -n sh -c '$up'"; then
 	restore || log "the rules may still be there: the VM removes them by itself within $((FOR + 60)) s"
 	die "could not set up the cut"

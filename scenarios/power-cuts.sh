@@ -26,6 +26,7 @@ while [ $# -ge 2 ]; do
 	shift 2
 done
 [ $# = 0 ] || { sed -n '3,12p' "$0"; exit 2; }
+number --cuts "$CUTS"; number --off "$OFF" 0; number --gap "$GAP" 0
 scenario_start power-cuts "$node"
 require_head 1800
 

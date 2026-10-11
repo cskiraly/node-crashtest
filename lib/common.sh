@@ -53,13 +53,13 @@ rpc() {
 		-d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":${3:-[]}}" "$1"
 }
 
-# ref_rpc METHOD [PARAMS]: a JSON-RPC call to the reference (REF), tried up to 3 times, 10 s apart,
-# while its reply has no result (public endpoints limit request rates); the last reply. Fails if none
-# had a result.
+# ref_rpc METHOD PARAMS [CHECK]: a JSON-RPC call to the reference (REF), tried up to 3 times, 10 s
+# apart, while its reply fails CHECK (a jq filter; default: a result, not null): public endpoints limit
+# request rates, and one behind may not have the block yet. The last reply; fails if none passed.
 ref_rpc() {
-	local r i
+	local r i check=${3:-.result != null}
 	for i in 1 2 3; do
-		r=$(rpc "$REF" "$@") && jq -e 'has("result")' <<<"$r" >/dev/null 2>&1 && { echo "$r"; return 0; }
+		r=$(rpc "$REF" "$1" "$2") && jq -e "$check" <<<"$r" >/dev/null 2>&1 && { echo "$r"; return 0; }
 		[ "$i" = 3 ] || sleep 10
 	done
 	echo "$r"
@@ -89,31 +89,31 @@ load_node() {
 	RUN=$(cat "$CRASHTEST_DIR/current-$NODE_NAME" 2>/dev/null || true)
 }
 
-# vm_addrs: the VM's IPv4 addresses that libvirt knows: its DHCP leases (on a NAT network), or else
-# the host's ARP entries for it.
-vm_addrs() {
-	local a
-	a=$("${VIRSH[@]}" domifaddr "$VM" 2>/dev/null | awk '/ipv4/ { split($4, x, "/"); print x[1] }')
-	[ -n "$a" ] || a=$("${VIRSH[@]}" domifaddr "$VM" --source arp 2>/dev/null | awk '/ipv4/ { split($4, x, "/"); print x[1] }')
-	echo "$a"
-}
+# uuid_of DOMAIN: a libvirt domain's UUID, which the VM's firmware (SMBIOS) gives the machine; lower case.
+uuid_of() { "${VIRSH[@]}" domuuid "$1" 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]'; }
+# MACHINE_UUID: the command that prints a machine's UUID, as root.
+MACHINE_UUID='cat /sys/class/dmi/id/product_uuid'
 
 # faults_allowed: refuse to touch a node that isn't marked as a test node (FAULTS_OK=1), or whose ssh
-# destination isn't its VM, as far as can be checked: power and link faults go to the VM through
-# libvirt, the others (iptables, a full disk, a database reset) over ssh, so both must reach the same
-# machine. The VM must be running, at an address libvirt knows; ssh's address must be one of its.
+# destination isn't its VM: power and link faults go to the VM through libvirt, the others (iptables,
+# a full disk, a database reset) over ssh, so both must reach the same machine. The VM must be running,
+# and the machine ssh reaches must have its UUID, read over the connection the faults use: neither a
+# wrong address nor an ssh connection shared with another machine passes.
 faults_allowed() {
 	[ "${FAULTS_OK:-}" = 1 ] || die "$NODE_NAME isn't marked as a test node (FAULTS_OK=1 in its env file); no faults on it"
-	local state host addrs
+	local state want got
 	state=$("${VIRSH[@]}" domstate "$VM" 2>/dev/null) || die "$NODE_NAME: libvirt has no VM $VM; no faults"
 	[ "$state" = running ] || die "$NODE_NAME: the VM $VM is ${state:-in no known state}, not running; no faults"
-	addrs=$(vm_addrs)
-	[ -n "$addrs" ] || die "$NODE_NAME: libvirt knows no address of the VM $VM (no DHCP lease, no ARP entry), so it can't tell whether ssh reaches the VM; no faults"
-	host=$("${NODE_SSH[@]}" -G "$NODE" 2>/dev/null | awk '$1 == "hostname" { print $2; exit }')
-	[[ $host =~ ^[0-9.]+$ ]] || host=$(getent ahostsv4 "$host" | awk 'NR == 1 { print $1 }')
-	grep -qxF "${host:-none}" <<<"$addrs" ||
-		die "$NODE_NAME: ssh reaches $NODE at ${host:-an unknown address}, but the VM $VM is at $(paste -sd' ' <<<"$addrs"): not the same machine, or the VM's address changed (then correct HostName in the ssh config); no faults"
+	want=$(uuid_of "$VM")
+	got=$(on "sudo -n $MACHINE_UUID" 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+	[ -n "$got" ] || die "$NODE_NAME: can't read the machine's UUID over ssh ($NODE: sudo -n $MACHINE_UUID); no faults"
+	[ -n "$want" ] && [ "$got" = "$want" ] ||
+		die "$NODE_NAME: ssh reaches a machine with UUID $got, not the VM $VM (${want:-no UUID}): a wrong HostName for $NODE, or an ssh connection shared with another machine; no faults"
+	ON_UUID=$want
 }
+
+# sq STRING: STRING quoted for a POSIX shell, in single quotes.
+sq() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
 
 # ev TEXT...: an event, with UTC time to the millisecond, to stdout and the run's events.log.
 ev() {
@@ -126,12 +126,16 @@ ev() {
 # on COMMAND: run COMMAND on the node (a shell command line, over ssh). A refused connection is tried
 # again, 6 times 10 s apart: the node's firewall may limit new ssh connections (to 6 in 30 s, say),
 # which a fault's checks right after a boot can exceed. Nothing ran on the node then, so this is
-# safe for any command.
+# safe for any command. Once faults_allowed has checked the node (ON_UUID), COMMAND runs only on a
+# machine with the VM's UUID, checked in the same ssh session (exit 99 otherwise): a connection shared
+# with the VM can end, and the next one go elsewhere.
 on() {
-	local err rc i
+	local err rc i pre=()
+	[ -z "${ON_UUID:-}" ] ||
+		pre=("[ \"\$(sudo -n $MACHINE_UUID | tr A-F a-f)\" = '$ON_UUID' ] || { echo 'not the VM $VM' >&2; exit 99; };")
 	err=$(mktemp)
 	for i in 1 2 3 4 5 6; do
-		"${NODE_SSH[@]}" -o BatchMode=yes "$NODE" "$@" 2>"$err" && rc=0 || rc=$?
+		"${NODE_SSH[@]}" -o BatchMode=yes "$NODE" "${pre[@]}" "$@" 2>"$err" && rc=0 || rc=$?
 		[ "$rc" = 255 ] && [ "$i" -lt 6 ] && grep -q 'Connection refused' "$err" && { sleep 10; continue; }
 		break
 	done
@@ -188,7 +192,9 @@ history_start() {
 #   never had (it saw the transaction only in a block); the pool can't keep it.
 # - "Number of finalized block is missing": after a crash, the finalized block's marker can name a block
 #   whose number the database lost; the chain freezer waits for the next finalized block.
-# - "blsync: checkpoint block is not available, reported as unknown": a beacon API endpoint behind the
-#   chain doesn't know the light client's checkpoint (seen 2026-10-11 with Nimbus's Hoodi endpoint 6 h
-#   behind); blsync starts from the other endpoints. (If none had it, the node would get no new head.)
-KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point|Truncating ancient chain|Blobs unavailable, dropping reorged tx|Number of finalized block is missing|blsync: checkpoint block is not available, reported as unknown'
+# - "blsync: checkpoint block is not available, reported as unknown", "blsync: checkpoint not available,
+#   but reported as finalized": one beacon API endpoint couldn't give the light client's checkpoint, being
+#   behind the chain (Nimbus's Hoodi endpoint, 6 h behind on 2026-10-11) or failing the request (Lodestar's
+#   bootstrap, once after a power cut); blsync tries again, and the other endpoints. (If it never got the
+#   checkpoint, the node would get no new head.)
+KNOWN_ERRORS='Cleaning spurious beacon sync leftovers|Beacon backfilling failed.*syncing canceled \(requested\)|Reject duplicated disable operation|SetHead invalidated finalized block|Corrupted index item detected|Failed (NewPayload|ForkchoiceUpdated).*context deadline exceeded|Log index initialization failed.*cannot start indexing before history cutoff point|Truncating ancient chain|Blobs unavailable, dropping reorged tx|Number of finalized block is missing|blsync: checkpoint block is not available, reported as unknown|blsync: checkpoint not available, but reported as finalized'

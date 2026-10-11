@@ -10,7 +10,7 @@
 #   faults/power-on-log.sh NODE PATTERN [OFF_SECONDS] [TIMEOUT_SECONDS]   (defaults 10, 3600)
 
 . "$(dirname "$0")/../lib/common.sh"
-[ $# -ge 2 ] || { sed -n '3,9p' "$0"; exit 2; }
+[ $# -ge 2 ] || { sed -n '3,10p' "$0"; exit 2; }
 load_node "$1"
 faults_allowed
 PATTERN=$2 OFF=${3:-10} TIMEOUT=${4:-3600}
