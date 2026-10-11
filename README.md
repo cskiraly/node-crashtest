@@ -1,3 +1,5 @@
+![node-crashtest: Ethereum node crash testing and hardening](.github/node-crashtest-banner.jpeg)
+
 # node-crashtest
 
 Crash tests for Ethereum nodes. A node runs in a local VM on a public network; node-crashtest cuts its
